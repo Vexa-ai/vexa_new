@@ -1,0 +1,123 @@
+version: '3'
+
+services:
+  gateway:
+    build:
+      context: .
+      dockerfile: docker/gateway/Dockerfile
+    ports:
+      - "8000:8000"
+    environment:
+      - BOT_MANAGER_URL=http://bot-manager:8080
+      - TRANSCRIPTION_URL=http://transcription-service:8080
+    volumes:
+      - ./src/gateway:/app
+    command: uvicorn main:app --host 0.0.0.0 --port 8000 --reload
+    depends_on:
+      - bot-manager
+      - transcription-service
+
+  bot-manager:
+    build:
+      context: .
+      dockerfile: docker/bot-manager/Dockerfile
+    ports:
+      - "8080:8080"
+    environment:
+      - NAMESPACE=local
+      - BOT_IMAGE=bot:latest
+      - TRANSCRIPTION_SERVICE=http://transcription-service:8080
+      - REDIS_URL=redis://redis:6379/0
+      - DB_HOST=postgres
+      - DB_PORT=5432
+      - DB_NAME=vexa
+      - DB_USER=postgres
+      - DB_PASSWORD=postgres
+    volumes:
+      - ./src/bot-manager:/app
+      - /var/run/docker.sock:/var/run/docker.sock
+    command: uvicorn main:app --host 0.0.0.0 --port 8080 --reload
+    depends_on:
+      - redis
+      - postgres
+
+  transcription-service:
+    build:
+      context: .
+      dockerfile: docker/transcription-service/Dockerfile
+    ports:
+      - "8081:8080"
+    environment:
+      - BOT_MANAGER_URL=http://bot-manager:8080
+    volumes:
+      - ./src/transcription-service:/app
+    command: uvicorn main:app --host 0.0.0.0 --port 8080 --reload
+    depends_on:
+      - bot-manager
+
+  bot:
+    build:
+      context: .
+      dockerfile: docker/bot/Dockerfile
+    image: bot:latest
+    environment:
+      - USER_ID=dev
+      - MEETING_ID=dev-meeting
+      - TRANSCRIPTION_SERVICE=http://transcription-service:8080
+    deploy:
+      replicas: 0  # Just build the image, don't start any containers
+
+  redis:
+    image: redis:7.0-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+
+  postgres:
+    image: postgres:15-alpine
+    ports:
+      - "5432:5432"
+    environment:
+      - POSTGRES_DB=vexa
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=postgres
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+
+  celery-worker:
+    build:
+      context: .
+      dockerfile: docker/bot-manager/Dockerfile
+    environment:
+      - NAMESPACE=local
+      - BOT_IMAGE=bot:latest
+      - TRANSCRIPTION_SERVICE=http://transcription-service:8080
+      - REDIS_URL=redis://redis:6379/0
+      - DB_HOST=postgres
+      - DB_PORT=5432
+      - DB_NAME=vexa
+      - DB_USER=postgres
+      - DB_PASSWORD=postgres
+    volumes:
+      - ./src/bot-manager:/app
+      - /var/run/docker.sock:/var/run/docker.sock
+    command: celery -A app.tasks.monitoring worker --loglevel=info
+    depends_on:
+      - redis
+      - postgres
+
+  bot-test:
+    build:
+      context: .
+      dockerfile: docker/bot/Dockerfile
+    environment:
+      - USER_ID=test123
+      - MEETING_ID=meeting456
+      - TRANSCRIPTION_SERVICE=http://transcription-service:8080
+    deploy:
+      replicas: 0  # Optional test bot, don't start automatically
+
+volumes:
+  redis-data:
+  postgres-data: 

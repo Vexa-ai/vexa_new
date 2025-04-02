@@ -31,6 +31,11 @@ async def root():
 async def run_bot(request: Request):
     """Forward bot run request to Bot Manager API"""
     data = await request.json()
+    
+    # Ensure meeting_url is present in the request
+    if "meeting_url" not in data:
+        data["meeting_url"] = "https://meet.google.com/xxx-xxxx-xxx"
+    
     async with httpx.AsyncClient() as client:
         response = await client.post(f"{BOT_MANAGER_URL}/bot/run", json=data)
         return JSONResponse(content=response.json(), status_code=response.status_code)

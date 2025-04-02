@@ -48,6 +48,7 @@ class BotRunRequest(BaseModel):
     user_id: str
     meeting_id: str
     meeting_title: Optional[str] = None
+    meeting_url: Optional[str] = "https://meet.google.com/xxx-xxxx-xxx"
 
 class BotStopRequest(BaseModel):
     user_id: str
@@ -72,14 +73,22 @@ async def root():
 @app.post("/bot/run")
 async def run_bot(request: BotRunRequest, background_tasks: BackgroundTasks):
     """Start a new bot container for a user and meeting"""
-    logger.info(f"Starting bot for user {request.user_id} and meeting {request.meeting_id}")
+    logger.info(f"Starting bot for user {request.user_id} and meeting {request.meeting_id} with URL {request.meeting_url}")
     
     try:
         # Start the bot container
         if ENVIRONMENT == "local" or ENVIRONMENT == "development":
-            result = container_client.create_bot_container(request.user_id, request.meeting_id)
+            result = container_client.create_bot_container(
+                request.user_id, 
+                request.meeting_id,
+                meeting_url=request.meeting_url
+            )
         else:
-            result = container_client.create_bot_pod(request.user_id, request.meeting_id)
+            result = container_client.create_bot_pod(
+                request.user_id, 
+                request.meeting_id,
+                meeting_url=request.meeting_url
+            )
         
         # Create meeting record in database
         background_tasks.add_task(

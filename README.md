@@ -9,10 +9,18 @@ The system consists of several key components:
 1. **Gateway API** - Entry point for client requests, routes to appropriate services
 2. **Bot Manager API** - Handles lifecycle of bot containers and transcription storage
 3. **Transcription Service** - Load-balanced service for processing transcriptions
-4. **Bot Containers** - User-specific containers dynamically created and managed
+4. **Bot Containers** - User-specific containers running the Vexa Bot for meeting participation
 5. **Redis** - Used by Celery for task queue and caching
 6. **PostgreSQL** - Database for storing transcriptions and metadata
 7. **Celery Workers** - Background workers for monitoring bot containers
+
+## Bot Implementation
+
+This system uses the [Vexa Bot](https://github.com/Vexa-ai/vexa-bot) for joining and participating in virtual meetings. The Vexa Bot:
+- Runs in a containerized environment
+- Can join Google Meet meetings 
+- Automatically handles waiting room and participant detection
+- Captures meeting transcriptions and forwards them to the transcription service
 
 ## Local Development Setup
 
@@ -26,16 +34,20 @@ The project includes Docker Compose configuration for easy local development.
 
 ### Getting Started with Local Development
 
-1. Clone the repository:
+1. Clone the repository and set up the environment:
 
 ```bash
 git clone <repository-url> vexa
 cd vexa
+make setup  # This will clone the Vexa Bot repository
 ```
 
 2. Start the local development environment:
 
 ```bash
+# Build all services (including the bot)
+make build
+
 # If you have Make installed:
 make up
 
@@ -81,10 +93,8 @@ docker-compose logs -f [service_name]
 You can create a test bot using the API or the provided shortcuts:
 
 ```bash
-# Using Make:
-make test  # Runs a predefined test bot
-# or create a custom bot:
-make run-bot USER=user123 MEETING=meeting456
+# Using Make with custom bot:
+make run-bot USER=user123 MEETING=meeting456 MEETING_URL=https://meet.google.com/your-meeting-code
 
 # Using curl:
 curl -X POST http://localhost:8000/bot/run \
@@ -92,9 +102,20 @@ curl -X POST http://localhost:8000/bot/run \
   -d '{
     "user_id": "user123",
     "meeting_id": "meeting456",
+    "meeting_url": "https://meet.google.com/your-meeting-code",
     "meeting_title": "Test Meeting"
   }'
 ```
+
+### Bot Configuration Options
+
+The bot accepts several environment variables:
+- `USER_ID` - User identifier
+- `MEETING_ID` - Meeting identifier
+- `MEETING_URL` - URL of the Google Meet meeting
+- `TRANSCRIPTION_SERVICE` - Endpoint to send transcriptions to
+
+Additional configuration options are available in the bot config file.
 
 ### Stopping the Services
 
@@ -138,10 +159,11 @@ vexa/
 ├── docker/                  # Dockerfiles for all components
 ├── helm/                    # Helm charts for Kubernetes deployment
 ├── k8s/                     # Kubernetes resources not managed by Helm
+├── vexa-bot/                # Vexa Bot implementation (cloned separately)
 └── src/                     # Source code for all components
     ├── gateway/             # Gateway API service
     ├── bot-manager/         # Bot Manager API service
-    ├── bot/                 # Bot container template
+    ├── bot/                 # Bot container integration code
     └── transcription-service/ # Transcription processing service
 ```
 
@@ -149,7 +171,13 @@ vexa/
 
 ### 1. Build and Push Docker Images
 
-First, build and push all Docker images to Google Artifact Registry:
+First, clone the Vexa Bot repository:
+
+```bash
+git clone https://github.com/Vexa-ai/vexa-bot.git
+```
+
+Then build and push all Docker images to Google Artifact Registry:
 
 ```bash
 # Set your GCP project ID
@@ -251,6 +279,7 @@ curl -X POST https://api.example.com/bot/run \
   -d '{
     "user_id": "user123",
     "meeting_id": "meeting456",
+    "meeting_url": "https://meet.google.com/xxx-xxxx-xxx", 
     "meeting_title": "Team Weekly Sync"
   }'
 ```
@@ -329,11 +358,17 @@ psql -h localhost -U postgres -d vexa
    - Verify RBAC permissions for bot-manager service account
    - Check if the bot image exists in the registry
 
-2. **Transcription not showing up**:
+2. **Bot cannot join meetings**:
+   - Ensure the meeting URL is correct and accessible
+   - Check if the meeting requires authentication
+   - Verify the bot has necessary permissions to join the meeting
+
+3. **Transcription not showing up**:
    - Check connectivity between bot containers and Transcription Service
    - Verify PostgreSQL is running and accessible
+   - Check bot logs for transcription processing errors
 
-3. **API Gateway not accessible**:
+4. **API Gateway not accessible**:
    - Check Ingress configuration
    - Verify GCP Load Balancer is properly configured
    - Check SSL certificates if using HTTPS
@@ -363,3 +398,40 @@ kubectl delete namespace vexa
 # Delete GKE cluster
 gcloud container clusters delete vexa-cluster --region=$REGION
 ``` 
+
+
+
+```mermaid
+graph TD
+    subgraph "Vexa System (Managed Environment - Docker Compose / Kubernetes)"
+        Client -- HTTP Request (run/stop bot, get transcript) --> Gateway[Gateway API];
+
+        Gateway -- Route Request --> BM[Bot Manager API];
+        Gateway -- Route Request --> TS[Transcription Service];
+
+        BM -- Start/Stop Container --> Infra[(Container Orchestrator API)];
+        BM -- Store/Retrieve Metadata --> DB[(PostgreSQL Database)];
+        BM -- Enqueue Task --> Redis[(Redis Task Queue)];
+
+        Celery[Celery Workers] -- Monitor Bots --> Infra;
+        Celery -- Read Task --> Redis;
+
+        TS -- Store/Retrieve Transcript --> DB;
+
+        subgraph "Running Bot Instance (Container/Pod)"
+            direction LR
+            BotContainer[Bot Container (vexa-bot code)];
+            BotContainer -- Join Meeting --> Meeting([External Meeting\ne.g., Google Meet]);
+            BotContainer -- Send Audio Stream --> WhisperWS([WhisperLive WebSocket]);
+            WhisperWS -- Send Transcription Chunks --> BotContainer;
+            BotContainer -- POST Transcription --> TS;
+        end
+
+        Infra -- Creates/Manages --> BotInstance[Bot Instance Container/Pod];
+    end
+
+    style Infra fill:#f9f,stroke:#333,stroke-width:2px
+    style Meeting fill:#ccf,stroke:#333,stroke-width:2px
+    style WhisperWS fill:#ccf,stroke:#333,stroke-width:2px
+
+```

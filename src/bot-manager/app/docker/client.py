@@ -17,7 +17,7 @@ class DockerClient:
         self.transcription_service = os.getenv("TRANSCRIPTION_SERVICE", "http://transcription-service:8080")
         self.network_name = os.getenv("DOCKER_NETWORK", "vexa_default")
     
-    def create_bot_container(self, user_id: str, meeting_id: str) -> Dict[str, Any]:
+    def create_bot_container(self, user_id: str, meeting_id: str, meeting_url: Optional[str] = None) -> Dict[str, Any]:
         """Create a new bot container for specific user and meeting"""
         container_name = f"bot-{user_id}-{meeting_id}"
         
@@ -40,6 +40,12 @@ class DockerClient:
             logger.error(f"Error checking container existence: {e}")
             raise
         
+        # Set default meeting URL if not provided
+        if not meeting_url:
+            meeting_url = "https://meet.google.com/xxx-xxxx-xxx"
+            
+        logger.info(f"Creating bot container for meeting URL: {meeting_url}")
+        
         # Create container
         try:
             container = self.client.containers.run(
@@ -50,6 +56,7 @@ class DockerClient:
                 environment={
                     "USER_ID": user_id,
                     "MEETING_ID": meeting_id,
+                    "MEETING_URL": meeting_url,
                     "TRANSCRIPTION_SERVICE": self.transcription_service
                 },
                 restart_policy={"Name": "on-failure", "MaximumRetryCount": 3}

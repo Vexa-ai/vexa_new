@@ -67,6 +67,8 @@ services:
       context: .
       dockerfile: docker/transcription-collector/Dockerfile
     # No port exposure - only internal service
+    ports:
+      - "9758:8000"  # Expose on port 8001
     environment:
       - DB_HOST=postgres
       - DB_PORT=5432
@@ -86,13 +88,13 @@ services:
   #   image: bot:latest
   #   environment:
   #     BOT_CONFIG: |
-  #       {"platform": "google", "meetingUrl": "https://meet.google.com/xxx-xxxx-xxx", "botName": "DevBot", "token": "", "connectionId": "", "automaticLeave": {"waitingRoomTimeout": 300000, "noOneJoinedTimeout": 300000, "everyoneLeftTimeout": 300000}}
+  #       {"platform": "google", "meetingUrl": "https://meet.google.com/xxx-xxxx-xxx", "botName": "DevBot", "token": "123", "connectionId": "", "automaticLeave": {"waitingRoomTimeout": 300000, "noOneJoinedTimeout": 300000, "everyoneLeftTimeout": 300000}}
   #     TRANSCRIPTION_SERVICE: http://whisperlive-trt:9090
   #   volumes:
   #     - ./vexa-bot-submodule:/app/vexa-bot
   #     - ./src/bot/transcript-adapter.js:/app/adapter.js
   #   deploy:
-  #     replicas: 0
+  #     replicas: 1
 
   redis:
     image: redis:7.0-alpine

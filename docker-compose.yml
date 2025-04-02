@@ -49,16 +49,19 @@ services:
       context: .
       dockerfile: docker/whisperlive-trt/Dockerfile
     volumes:
-      - whisper-model-data:/app/TensorRT-LLM-examples/whisper
-      - ./WhisperLive/whisper_live:/app/whisper_live
+      # Volume for faster_whisper model cache (optional but recommended)
+      - whisper-model-data:/root/.cache/faster_whisper 
+      - ./WhisperLive/whisper_live:/app/whisper_live 
     environment:
       - TRANSCRIPTION_COLLECTOR_URL=ws://transcription-collector:8000/collector
+    # Explicitly use faster_whisper backend with medium model
+    command: ["--port", "9090", "--backend", "faster_whisper", "--faster_whisper_model_name", "medium"]
     deploy:
       resources:
         reservations:
           devices:
             - driver: nvidia
-              count: 1
+              device_ids: ['3'] # Keep on GPU 3
               capabilities: [gpu]
     depends_on:
       - transcription-collector
@@ -135,4 +138,5 @@ services:
 volumes:
   redis-data:
   postgres-data:
-  whisper-model-data: 
+  whisper-model-data:
+  # whisper-model-data: # Removed 

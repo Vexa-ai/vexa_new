@@ -1,27 +1,19 @@
-FROM python:3.9-slim
+FROM python:3.10-slim
 
 WORKDIR /app
 
-# Install required packages
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    gcc \
-    python3-dev \
-    libffi-dev \
-    && rm -rf /var/lib/apt/lists/*
-
+# Install dependencies
 COPY src/bot-manager/requirements.txt .
+# Install OS dependencies needed for the docker library (to talk to the socket)
+# Typically, the base python:slim image is enough, but if issues arise, 
+# common packages like 'build-essential', 'libffi-dev', 'python3-dev' might be needed.
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Create necessary directories
-RUN mkdir -p /app/app/kubernetes /app/app/database /app/app/tasks /app/app/docker
+# Copy application code
+COPY src/bot-manager/ .
 
-COPY src/bot-manager/main.py .
-COPY src/bot-manager/app /app/app/
+# Set the default log level if not provided by environment
+ENV LOG_LEVEL=INFO
 
-# Set environment variables
-ENV PYTHONUNBUFFERED=1
-ENV ENVIRONMENT=local
-
-EXPOSE 8080
-
+# Run the application
 CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8080"] 

@@ -1,10 +1,15 @@
-fastapi==0.95.1
-uvicorn==0.22.0
-kubernetes==26.1.0
-docker==6.1.3
+fastapi
+uvicorn[standard]
+redis>=4.0.0,<5.0.0
+docker>=6.0.0,<7.0.0
+python-dotenv
 pydantic==1.10.7
-python-dotenv==1.0.0
 celery==5.3.0
-redis==4.5.5
-psycopg2-binary==2.9.6
-sqlalchemy==2.0.12 
+# psycopg2-binary==2.9.6 # Re-add this for sync engine
+psycopg2-binary>=2.8 # Use a version specifier
+sqlalchemy>=2.0.0 # Ensure version 2+ for async
+asyncpg # Add async postgres driver
+databases[postgresql]>=0.5.0 # Add the databases library
+email-validator # Add for Pydantic EmailStr validation
+requests_unixsocket # Add for testing socket connection directly
+# alembic # Optional: Add if database migrations are needed later 

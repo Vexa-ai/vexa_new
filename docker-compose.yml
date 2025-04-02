@@ -17,36 +17,37 @@ services:
   #     - bot-manager
   #     - whisperlive-trt
 
-  # bot-manager:
-  #   build:
-  #     context: .
-  #     dockerfile: docker/bot-manager/Dockerfile
-  #   ports:
-  #     - "8081:8080"
-  #   environment:
-  #     - ENVIRONMENT=local
-  #     - BOT_IMAGE=bot:latest
-  #     - TRANSCRIPTION_SERVICE=http://whisperlive-trt:9090
-  #     - REDIS_URL=redis://redis:6379/0
-  #     - DB_HOST=postgres
-  #     - DB_PORT=5432
-  #     - DB_NAME=vexa
-  #     - DB_USER=postgres
-  #     - DB_PASSWORD=postgres
-  #   volumes:
-  #     - ./src/bot-manager:/app
-  #     - /var/run/docker.sock:/var/run/docker.sock
-  #   command: uvicorn main:app --host 0.0.0.0 --port 8080 --reload
-  #   depends_on:
-  #     - redis
-  #     - postgres
+  bot-manager:
+    build:
+      context: .
+      dockerfile: docker/bot-manager/Dockerfile
+    ports:
+      - ":8080"
+    environment:
+      - REDIS_URL=redis://redis:6379/0
+      - BOT_IMAGE=vexa-bot:latest
+      - DOCKER_NETWORK=vexa_default
+      - LOG_LEVEL=DEBUG
+      - DB_HOST=postgres
+      - DB_PORT=5432
+      - DB_NAME=vexa
+      - DB_USER=postgres
+      - DB_PASSWORD=postgres
+      - ADMIN_API_TOKEN=supersecretadmintoken
+      - DOCKER_HOST=unix://var/run/docker.sock
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./src/bot-manager:/app/bot-manager
+    working_dir: /app
+    command: uvicorn bot-manager.main:app --host 0.0.0.0 --port 8080
+    depends_on:
+      - redis
+      - postgres
 
   whisperlive-trt:
     build:
       context: .
       dockerfile: docker/whisperlive-trt/Dockerfile
-    ports:
-      - "9090:9090"
     volumes:
       - whisper-model-data:/app/TensorRT-LLM-examples/whisper
       - ./WhisperLive/whisper_live:/app/whisper_live
@@ -66,9 +67,8 @@ services:
     build:
       context: .
       dockerfile: docker/transcription-collector/Dockerfile
-    # No port exposure - only internal service
     ports:
-      - "9758:8000"  # Expose on port 8001
+      - ":8000"
     environment:
       - DB_HOST=postgres
       - DB_PORT=5432
@@ -131,7 +131,6 @@ services:
   #   depends_on:
   #     - redis
   #     - postgres
-
 
 volumes:
   redis-data:

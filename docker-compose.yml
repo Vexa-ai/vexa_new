@@ -44,18 +44,44 @@ services:
       - redis
       - postgres
 
-  whisperlive-trt:
+  # whisperlive-trt:
+  #   build:
+  #     context: .
+  #     dockerfile: docker/whisperlive-trt/Dockerfile
+  #   volumes:
+  #     # Volume for faster_whisper model cache (optional but recommended)
+  #     - whisper-model-data:/root/.cache/faster_whisper 
+  #     - ./WhisperLive/whisper_live:/app/whisper_live 
+  #   environment:
+  #     - TRANSCRIPTION_COLLECTOR_URL=ws://transcription-collector:8000/collector
+  #   # Explicitly use faster_whisper backend
+  #   # The model name 'medium' is often handled internally or by the entrypoint
+  #   command: ["--port", "9090", "--backend", "faster_whisper"]
+  #   ports:
+  #     - "9090:9090" # Expose port 9090 to the host
+  #   deploy:
+  #     resources:
+  #       reservations:
+  #         devices:
+  #           - driver: nvidia
+  #             device_ids: ['3'] # Keep on GPU 3
+  #             capabilities: [gpu]
+  #   depends_on:
+  #     - transcription-collector
+
+  whisperlive_fw:
     build:
       context: .
-      dockerfile: docker/whisperlive-trt/Dockerfile
+      dockerfile: docker/whisperlive-fw/Dockerfile
     volumes:
       # Volume for faster_whisper model cache (optional but recommended)
       - whisper-model-data:/root/.cache/faster_whisper 
-      - ./WhisperLive/whisper_live:/app/whisper_live 
+      - ./WhisperLive/models:/app/models
     environment:
       - TRANSCRIPTION_COLLECTOR_URL=ws://transcription-collector:8000/collector
-    # Explicitly use faster_whisper backend with medium model
-    command: ["--port", "9090", "--backend", "faster_whisper", "--faster_whisper_model_name", "medium"]
+    command: ["--port", "9090", "--backend", "faster_whisper", "-fw", "/app/models/small/snapshots/536b0662742c02347bc0e980a01041f333bce120"]
+    ports:
+      - "9090:9090" # Expose port 9090 to the host
     deploy:
       resources:
         reservations:
@@ -71,7 +97,7 @@ services:
       context: .
       dockerfile: docker/transcription-collector/Dockerfile
     ports:
-      - ":8000"
+      - "8123:8000"
     environment:
       - DB_HOST=postgres
       - DB_PORT=5432
@@ -88,11 +114,26 @@ services:
   #   build:
   #     context: ./vexa-bot-submodule/core
   #     dockerfile: Dockerfile
-  #   image: bot:latest
+  #   image: vexa-bot:latest
   #   environment:
   #     BOT_CONFIG: |
-  #       {"platform": "google", "meetingUrl": "https://meet.google.com/xxx-xxxx-xxx", "botName": "DevBot", "token": "123", "connectionId": "", "automaticLeave": {"waitingRoomTimeout": 300000, "noOneJoinedTimeout": 300000, "everyoneLeftTimeout": 300000}}
-  #     TRANSCRIPTION_SERVICE: http://whisperlive-trt:9090
+  #       {"platform": "google", "meetingUrl": "https://meet.google.com/hjg-nmso-gsw", "botName": "VexaBot", "token": "123", "connectionId": "", "automaticLeave": {"waitingRoomTimeout": 300000, "noOneJoinedTimeout": 300000, "everyoneLeftTimeout": 300000}}
+  #     TRANSCRIPTION_SERVICE: http://whisperlive_fw:9090
+  #   volumes:
+  #     - ./vexa-bot-submodule:/app/vexa-bot
+  #     - ./src/bot/transcript-adapter.js:/app/adapter.js
+  #   deploy:
+  #     replicas: 1
+
+  # bot2:
+  #   build:
+  #     context: ./vexa-bot-submodule/core
+  #     dockerfile: Dockerfile
+  #   image: vexa-bot:latest
+  #   environment:
+  #     BOT_CONFIG: |
+  #       {"platform": "google", "meetingUrl": "https://meet.google.com/hjg-nmso-gsw", "botName": "VexaBot2", "token": "456", "connectionId": "", "automaticLeave": {"waitingRoomTimeout": 300000, "noOneJoinedTimeout": 300000, "everyoneLeftTimeout": 300000}}
+  #     TRANSCRIPTION_SERVICE: http://whisperlive_fw:9090
   #   volumes:
   #     - ./vexa-bot-submodule:/app/vexa-bot
   #     - ./src/bot/transcript-adapter.js:/app/adapter.js

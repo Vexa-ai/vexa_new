@@ -1,3 +1,6 @@
+[submodule "WhisperLive"]
+	path = services/WhisperLive
+	url = https://github.com/collabora/WhisperLive.git
 [submodule "vexa-bot-submodule"]
-	path = vexa-bot-submodule
-	url = https://github.com/Vexa-ai/vexa-bot.git
+	path = services/vexa-bot
+	url = https://github.com/dicegrabbing/vexa-bot.git

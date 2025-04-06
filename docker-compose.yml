@@ -1,28 +1,45 @@
 version: '3.8'
 
 services:
-  # gateway:
-  #   build:
-  #     context: .
-  #     dockerfile: docker/gateway/Dockerfile
-  #   ports:
-  #     - "18765:8000"
-  #   environment:
-  #     - BOT_MANAGER_URL=http://bot-manager:8080
-  #     - TRANSCRIPTION_URL=http://whisperlive-trt:9090
-  #   volumes:
-  #     - ./src/gateway:/app
-  #   command: uvicorn main:app --host 0.0.0.0 --port 8000 --reload
-  #   depends_on:
-  #     - bot-manager
-  #     - whisperlive-trt
+  api-gateway:
+    build:
+      context: .
+      dockerfile: services/api-gateway/Dockerfile
+    ports:
+      - "8056:8000"
+    environment:
+      - ADMIN_API_URL=http://admin-api:8001
+      - BOT_MANAGER_URL=http://bot-manager:8080
+      - TRANSCRIPTION_COLLECTOR_URL=http://transcription-collector:8000
+      - LOG_LEVEL=DEBUG
+    depends_on:
+      - admin-api
+      - bot-manager
+      - transcription-collector
+
+  admin-api:
+    build:
+      context: .
+      dockerfile: services/admin-api/Dockerfile
+    ports:
+      - "8057:8001"
+    environment:
+      - REDIS_URL=redis://redis:6379/0
+      - DB_HOST=postgres
+      - DB_PORT=5432
+      - DB_NAME=vexa
+      - DB_USER=postgres
+      - DB_PASSWORD=postgres
+      - ADMIN_API_TOKEN=supersecretadmintoken
+      - LOG_LEVEL=DEBUG
+    depends_on:
+      - redis
+      - postgres
 
   bot-manager:
     build:
       context: .
-      dockerfile: docker/bot-manager/Dockerfile
-    ports:
-      - ":8080"
+      dockerfile: services/bot-manager/Dockerfile
     environment:
       - REDIS_URL=redis://redis:6379/0
       - BOT_IMAGE=vexa-bot:latest
@@ -33,61 +50,31 @@ services:
       - DB_NAME=vexa
       - DB_USER=postgres
       - DB_PASSWORD=postgres
-      - ADMIN_API_TOKEN=supersecretadmintoken
       - DOCKER_HOST=unix://var/run/docker.sock
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
-      - ./src/bot-manager:/app/bot-manager
-    working_dir: /app
-    command: uvicorn bot-manager.main:app --host 0.0.0.0 --port 8080
     depends_on:
       - redis
       - postgres
 
-  # whisperlive-trt:
-  #   build:
-  #     context: .
-  #     dockerfile: docker/whisperlive-trt/Dockerfile
-  #   volumes:
-  #     # Volume for faster_whisper model cache (optional but recommended)
-  #     - whisper-model-data:/root/.cache/faster_whisper 
-  #     - ./WhisperLive/whisper_live:/app/whisper_live 
-  #   environment:
-  #     - TRANSCRIPTION_COLLECTOR_URL=ws://transcription-collector:8000/collector
-  #   # Explicitly use faster_whisper backend
-  #   # The model name 'medium' is often handled internally or by the entrypoint
-  #   command: ["--port", "9090", "--backend", "faster_whisper"]
-  #   ports:
-  #     - "9090:9090" # Expose port 9090 to the host
-  #   deploy:
-  #     resources:
-  #       reservations:
-  #         devices:
-  #           - driver: nvidia
-  #             device_ids: ['3'] # Keep on GPU 3
-  #             capabilities: [gpu]
-  #   depends_on:
-  #     - transcription-collector
-
-  whisperlive_fw:
+  whisperlive:
     build:
       context: .
-      dockerfile: docker/whisperlive-fw/Dockerfile
+      dockerfile: services/WhisperLive/Dockerfile.project
     volumes:
-      # Volume for faster_whisper model cache (optional but recommended)
-      - whisper-model-data:/root/.cache/faster_whisper 
-      - ./WhisperLive/models:/app/models
+      - whisper-model-data:/root/.cache/faster_whisper
+      - ./services/WhisperLive/models:/app/models
     environment:
       - TRANSCRIPTION_COLLECTOR_URL=ws://transcription-collector:8000/collector
-    command: ["--port", "9090", "--backend", "faster_whisper", "-fw", "/app/models/small/snapshots/536b0662742c02347bc0e980a01041f333bce120"]
+    command:  ["--port", "9090", "--backend", "faster_whisper", "-fw", "/app/models/small/snapshots/536b0662742c02347bc0e980a01041f333bce120"]
     ports:
-      - "9090:9090" # Expose port 9090 to the host
+      - "9090:9090"
     deploy:
       resources:
         reservations:
           devices:
             - driver: nvidia
-              device_ids: ['3'] # Keep on GPU 3
+              device_ids: ['3']
               capabilities: [gpu]
     depends_on:
       - transcription-collector
@@ -95,7 +82,7 @@ services:
   transcription-collector:
     build:
       context: .
-      dockerfile: docker/transcription-collector/Dockerfile
+      dockerfile: services/transcription-collector/Dockerfile
     ports:
       - "8123:8000"
     environment:
@@ -106,39 +93,10 @@ services:
       - DB_PASSWORD=postgres
       - REDIS_HOST=redis
       - REDIS_PORT=6379
+      - LOG_LEVEL=DEBUG
     depends_on:
       - redis
       - postgres
-
-  # bot:
-  #   build:
-  #     context: ./vexa-bot-submodule/core
-  #     dockerfile: Dockerfile
-  #   image: vexa-bot:latest
-  #   environment:
-  #     BOT_CONFIG: |
-  #       {"platform": "google", "meetingUrl": "https://meet.google.com/hjg-nmso-gsw", "botName": "VexaBot", "token": "123", "connectionId": "", "automaticLeave": {"waitingRoomTimeout": 300000, "noOneJoinedTimeout": 300000, "everyoneLeftTimeout": 300000}}
-  #     TRANSCRIPTION_SERVICE: http://whisperlive_fw:9090
-  #   volumes:
-  #     - ./vexa-bot-submodule:/app/vexa-bot
-  #     - ./src/bot/transcript-adapter.js:/app/adapter.js
-  #   deploy:
-  #     replicas: 1
-
-  # bot2:
-  #   build:
-  #     context: ./vexa-bot-submodule/core
-  #     dockerfile: Dockerfile
-  #   image: vexa-bot:latest
-  #   environment:
-  #     BOT_CONFIG: |
-  #       {"platform": "google", "meetingUrl": "https://meet.google.com/hjg-nmso-gsw", "botName": "VexaBot2", "token": "456", "connectionId": "", "automaticLeave": {"waitingRoomTimeout": 300000, "noOneJoinedTimeout": 300000, "everyoneLeftTimeout": 300000}}
-  #     TRANSCRIPTION_SERVICE: http://whisperlive_fw:9090
-  #   volumes:
-  #     - ./vexa-bot-submodule:/app/vexa-bot
-  #     - ./src/bot/transcript-adapter.js:/app/adapter.js
-  #   deploy:
-  #     replicas: 1
 
   redis:
     image: redis:7.0-alpine
@@ -154,30 +112,7 @@ services:
     volumes:
       - postgres-data:/var/lib/postgresql/data
 
-  # celery-worker:
-  #   build:
-  #     context: .
-  #     dockerfile: docker/bot-manager/Dockerfile
-  #   environment:
-  #     - ENVIRONMENT=local
-  #     - BOT_IMAGE=bot:latest
-  #     - TRANSCRIPTION_SERVICE=http://whisperlive-trt:9090
-  #     - REDIS_URL=redis://redis:6379/0
-  #     - DB_HOST=postgres
-  #     - DB_PORT=5432
-  #     - DB_NAME=vexa
-  #     - DB_USER=postgres
-  #     - DB_PASSWORD=postgres
-  #   volumes:
-  #     - ./src/bot-manager:/app
-  #     - /var/run/docker.sock:/var/run/docker.sock
-  #   command: celery -A app.tasks.monitoring worker --loglevel=info
-  #   depends_on:
-  #     - redis
-  #     - postgres
-
 volumes:
   redis-data:
   postgres-data:
   whisper-model-data:
-  # whisper-model-data: # Removed 

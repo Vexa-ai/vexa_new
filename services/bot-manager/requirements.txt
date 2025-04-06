@@ -1,0 +1,17 @@
+# Shared library dependency - REMOVED (Installed via Dockerfile RUN command)
+# -e ../../libs/shared-models
+fastapi
+uvicorn[standard]
+redis>=4.0.0,<5.0.0
+docker>=6.0.0,<7.0.0
+python-dotenv
+# pydantic==1.10.7 # Now handled by shared-models
+celery==5.3.0
+# psycopg2-binary==2.9.6 # Re-add this for sync engine
+# psycopg2-binary>=2.8 # Now handled by shared-models
+# sqlalchemy>=2.0.0 # Now handled by shared-models
+# asyncpg # Now handled by shared-models
+# databases[postgresql]>=0.5.0 # Now handled by shared-models
+email-validator # Added for Pydantic EmailStr support via shared-models
+requests_unixsocket # Add for testing socket connection directly
+# alembic # Optional: Add if database migrations are needed later 

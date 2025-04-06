@@ -6,8 +6,6 @@ import httpx
 import os
 from dotenv import load_dotenv
 import json # For request body processing
-from pydantic import BaseModel, Field
-from typing import Dict, Any, List, Optional
 
 load_dotenv()
 
@@ -16,68 +14,7 @@ ADMIN_API_URL = os.getenv("ADMIN_API_URL", "http://admin-api:8001") # New servic
 BOT_MANAGER_URL = os.getenv("BOT_MANAGER_URL", "http://bot-manager:8080") # Corrected default name
 TRANSCRIPTION_COLLECTOR_URL = os.getenv("TRANSCRIPTION_COLLECTOR_URL", "http://transcription-collector:8000") # Use collector service name
 
-# Response Models
-class BotResponseModel(BaseModel):
-    status: str = Field(..., description="Status of the bot operation (started, stopped, not_found, etc.)")
-    message: str = Field(..., description="Human-readable message about the operation")
-    meeting_id: Optional[str] = Field(None, description="The unique meeting identifier")
-    container_id: Optional[str] = Field(None, description="The Docker container ID running the bot")
-
-class MeetingModel(BaseModel):
-    platform: str = Field(..., description="Platform identifier (e.g., 'google_meet', 'zoom')")
-    meeting_url: str = Field(..., description="Meeting URL")
-
-class MeetingsResponseModel(BaseModel):
-    meetings: List[MeetingModel] = Field(..., description="List of meetings")
-
-class TranscriptSegmentModel(BaseModel):
-    id: int = Field(..., description="Segment ID")
-    client_uid: str = Field(..., description="Client unique identifier")
-    start_time: float = Field(..., description="Starting timestamp in seconds")
-    end_time: float = Field(..., description="Ending timestamp in seconds")
-    text: str = Field(..., description="Transcribed text")
-    created_at: str = Field(..., description="Creation timestamp")
-
-class TranscriptResponseModel(BaseModel):
-    platform: str = Field(..., description="Platform identifier")
-    meeting_url: str = Field(..., description="Meeting URL")
-    segments: List[TranscriptSegmentModel] = Field(..., description="List of transcript segments")
-
-class UserModel(BaseModel):
-    id: int = Field(..., description="User ID")
-    email: str = Field(..., description="User email")
-    created_at: str = Field(..., description="User creation timestamp")
-
-class TokenModel(BaseModel):
-    id: int = Field(..., description="Token ID")
-    token: str = Field(..., description="API token value")
-    user_id: int = Field(..., description="Associated user ID")
-    created_at: str = Field(..., description="Token creation timestamp")
-
-app = FastAPI(
-    title="Vexa API Gateway",
-    description="""
-    Main entry point for the Vexa platform APIs.
-    
-    This API gateway provides a single entry point to access the different services:
-    - Bot Manager: Controls bot instances that join meetings
-    - Transcription Collector: Manages meeting transcriptions
-    - Admin API: User and token management
-    
-    ## Authentication
-    - Regular endpoints: Use `X-API-Key` header with your API token
-    - Admin endpoints: Use `X-Admin-API-Key` header with the admin token
-    """,
-    version="1.0.0",
-    contact={
-        "name": "Vexa Support",
-        "url": "https://vexa.io/support",
-        "email": "support@vexa.io",
-    },
-    license_info={
-        "name": "Proprietary",
-    },
-)
+app = FastAPI(title="Vexa API Gateway", description="Main entry point for Vexa APIs")
 
 # Add CORS middleware
 app.add_middleware(
@@ -131,117 +68,48 @@ async def forward_request(client: httpx.AsyncClient, method: str, url: str, requ
         raise HTTPException(status_code=503, detail=f"Service unavailable: {exc}")
 
 # --- Root Endpoint --- 
-@app.get("/", tags=["General"])
+@app.get("/")
 async def root():
-    """
-    Root endpoint that provides basic information about the API.
-    
-    Returns:
-        A welcome message for the Vexa API Gateway.
-    """
     return {"message": "Welcome to the Vexa API Gateway"}
 
 # --- Bot Manager Routes --- 
-@app.post("/bots", 
-         tags=["Bot Management"],
-         summary="Request a new bot to join a meeting",
-         description="""
-         Creates a new bot instance to join a specified meeting.
-         
-         The bot will join the meeting identified by the platform and meeting URL provided in the request body.
-         Authentication requires a valid API token in the X-API-Key header.
-         The system will ensure only one bot is active per meeting.
-         """,
-         response_model=BotResponseModel,
-         status_code=201)
+@app.post("/bots")
 async def request_bot_proxy(request: Request):
     url = f"{BOT_MANAGER_URL}/bots"
     return await forward_request(app.state.http_client, "POST", url, request)
 
-@app.delete("/bots/{platform}/{platform_specific_id}/{token}", 
-           tags=["Bot Management"],
-           summary="Stop a bot in a meeting",
-           description="""
-           Stops an active bot in the specified meeting.
-           
-           The bot is identified by the combination of platform, platform-specific identifier, and token.
-           Authentication requires the same API token in the X-API-Key header that was used to create the bot.
-           """,
-           response_model=BotResponseModel)
+@app.delete("/bots/{platform}/{platform_specific_id}/{token}")
 async def stop_bot_proxy(platform: str, platform_specific_id: str, token: str, request: Request):
     url = f"{BOT_MANAGER_URL}/bots/{platform}/{platform_specific_id}/{token}"
     return await forward_request(app.state.http_client, "DELETE", url, request)
 
 # --- Transcription Collector Routes --- 
-@app.get("/meetings", 
-        tags=["Transcriptions"],
-        summary="Get list of meetings with transcriptions",
-        description="""
-        Returns a list of all meetings that have transcription data.
-        
-        Authentication requires a valid API token in the X-API-Key header.
-        """,
-        response_model=MeetingsResponseModel)
+@app.get("/meetings")
 async def get_meetings_proxy(request: Request):
     url = f"{TRANSCRIPTION_COLLECTOR_URL}/meetings"
     # Auth header (X-API-Key) is handled by forward_request
     return await forward_request(app.state.http_client, "GET", url, request)
 
-@app.get("/meeting/transcript", 
-        tags=["Transcriptions"],
-        summary="Get transcript for a specific meeting",
-        description="""
-        Returns the full transcript for a specific meeting.
-        
-        Authentication requires a valid API token in the X-API-Key header.
-        The meeting is identified by platform and meeting URL query parameters.
-        """,
-        response_model=TranscriptResponseModel)
+@app.get("/meeting/transcript")
 async def get_meeting_transcript_proxy(request: Request):
     # Pass query parameters through
     url = f"{TRANSCRIPTION_COLLECTOR_URL}/meeting/transcript?{request.query_params}"
     # Auth header (X-API-Key) is handled by forward_request
     return await forward_request(app.state.http_client, "GET", url, request)
 
-# --- Admin API Routes ---
+# --- Admin API Routes (Placeholder) ---
 # Auth header (X-Admin-API-Key) is handled by forward_request
-@app.post("/admin/users", 
-         tags=["Admin"],
-         summary="Create a new user",
-         description="""
-         Creates a new user in the system.
-         
-         Requires admin authentication using the X-Admin-API-Key header.
-         """,
-         response_model=UserModel,
-         status_code=201)
+@app.post("/admin/users")
 async def create_user_proxy(request: Request):
     url = f"{ADMIN_API_URL}/admin/users"
     return await forward_request(app.state.http_client, "POST", url, request)
 
-@app.get("/admin/users", 
-        tags=["Admin"],
-        summary="List all users",
-        description="""
-        Returns a list of all users in the system.
-        
-        Requires admin authentication using the X-Admin-API-Key header.
-        """,
-        response_model=List[UserModel])
+@app.get("/admin/users")
 async def list_users_proxy(request: Request):
     url = f"{ADMIN_API_URL}/admin/users?{request.query_params}"
     return await forward_request(app.state.http_client, "GET", url, request)
 
-@app.post("/admin/users/{user_id}/tokens", 
-         tags=["Admin"],
-         summary="Generate a new API token for a user",
-         description="""
-         Creates a new API token for the specified user.
-         
-         Requires admin authentication using the X-Admin-API-Key header.
-         """,
-         response_model=TokenModel,
-         status_code=201)
+@app.post("/admin/users/{user_id}/tokens")
 async def create_token_proxy(user_id: int, request: Request):
     url = f"{ADMIN_API_URL}/admin/users/{user_id}/tokens"
     return await forward_request(app.state.http_client, "POST", url, request)

@@ -140,7 +140,7 @@ const startRecording = async (page: Page, meetingUrl: string, token: string, con
         const structuredId = `${platform}_${btoa(meetingUrl)}_${connectionId}`;
 
         // WebSocket connection with retry mechanism
-        const wsUrl = "ws://whisperlive-trt:9090";
+        const wsUrl = "ws://whisperlive:9090";
         (window as any).logBot(`Attempting to connect WebSocket to: ${wsUrl} with platform: ${platform}`);
         
         let socket: WebSocket | null = null;

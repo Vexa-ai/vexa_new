@@ -66,7 +66,10 @@ def start_bot_container(platform: str, meeting_url: str, bot_name: str, token: s
     
     environment = [
         f"BOT_CONFIG={bot_config_json}",
-        "TRANSCRIPTION_SERVICE=ws://whisperlive-trt:9090"
+        "PLATFORM=" + platform,
+        "TOKEN=" + token,
+        "MEETING_URL=" + meeting_url,
+        "TRANSCRIPTION_SERVICE=ws://whisperlive:9090"
     ]
 
     # Docker API payload for creating a container

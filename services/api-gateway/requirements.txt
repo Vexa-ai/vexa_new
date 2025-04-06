@@ -2,4 +2,7 @@ fastapi==0.95.1
 uvicorn==0.22.0
 httpx==0.24.0
 pydantic==1.10.7
-python-dotenv==1.0.0 
+python-dotenv==1.0.0
+# Documentation
+pyyaml==6.0
+python-multipart==0.0.6 

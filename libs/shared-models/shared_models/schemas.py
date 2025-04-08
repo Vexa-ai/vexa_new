@@ -22,7 +22,7 @@ class Platform(str, Enum):
         This maps external API platform names to internal bot platform names.
         """
         mapping = {
-            Platform.GOOGLE_MEET: "google",
+            Platform.GOOGLE_MEET: "google_meet",
             Platform.ZOOM: "zoom",
             Platform.TEAMS: "teams"
         }
@@ -46,6 +46,19 @@ class Platform(str, Enum):
         except ValueError:
             # If the platform string is invalid, return it unchanged or handle error
             return platform_str # Or raise error/log warning
+
+    @classmethod
+    def get_api_value(cls, bot_platform_name: str) -> Optional[str]:
+        """
+        Gets the external API enum value from the internal bot platform name.
+        Returns None if the bot name is unknown.
+        """
+        reverse_mapping = {
+            "google_meet": Platform.GOOGLE_MEET.value,
+            "zoom": Platform.ZOOM.value,
+            "teams": Platform.TEAMS.value
+        }
+        return reverse_mapping.get(bot_platform_name)
 
     @classmethod
     def construct_meeting_url(cls, platform_str: str, native_id: str) -> Optional[str]:
@@ -180,17 +193,19 @@ class TranscriptionSegment(BaseModel):
         orm_mode = True
         allow_population_by_field_name = True # Allow using both alias and field name
 
-class TranscriptionRequest(BaseModel):
-    """Data structure for storing transcription data from external sources."""
-    client_uid: Optional[str] = None # Make optional
-    platform: Platform # Use enum
-    native_meeting_id: str # Changed from meeting_url
-    token: str
-    # Allow 'segments' as an alias for 'transcription'
-    transcription: List[TranscriptionSegment] = Field(..., alias='segments')
+# --- WebSocket Schema (NEW - Represents data from WhisperLive) ---
+
+class WhisperLiveData(BaseModel):
+    """Schema for the data message sent by WhisperLive to the collector."""
+    uid: str # Unique identifier from the original client connection
+    platform: Platform
+    meeting_url: Optional[str] = None
+    token: str # User API token
+    meeting_id: str # Native Meeting ID (string, e.g., 'abc-xyz-pqr')
+    segments: List[TranscriptionSegment]
 
     @validator('platform', pre=True)
-    def validate_transcription_platform_str(cls, v):
+    def validate_whisperlive_platform_str(cls, v):
         """Validate that the platform string is one of the supported platforms"""
         try:
             Platform(v)
@@ -199,12 +214,7 @@ class TranscriptionRequest(BaseModel):
             supported = ', '.join([p.value for p in Platform])
             raise ValueError(f"Invalid platform '{v}'. Must be one of: {supported}")
 
-class TranscriptionData(BaseModel):
-    """Data structure expected from WhisperLive client."""
-    meeting_id: Optional[int] = None # Make optional
-    segments: List[TranscriptionSegment] # Expecting new structure
-    # Removed platform, meeting_url, token - should be linked via meeting_id
-
+# --- Other Schemas ---
 class TranscriptionResponse(BaseModel): # Doesn't inherit MeetingResponse to avoid redundancy if joining data
     """Response for getting a meeting's transcript."""
     # Meeting details (consider duplicating fields from MeetingResponse or nesting)

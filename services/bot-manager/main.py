@@ -18,7 +18,7 @@ from docker_utils import get_socket_session, close_docker_client, start_bot_cont
 from shared_models.database import init_db, get_db
 from shared_models.models import User, Meeting # Import Meeting model
 from shared_models.schemas import MeetingCreate, MeetingResponse, Platform # Import new schemas and Platform
-from auth import get_current_user # Import auth dependency
+from auth import get_user_and_token # Import the new dependency
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 from sqlalchemy import and_
@@ -73,43 +73,47 @@ async def root():
           response_model=MeetingResponse,
           status_code=status.HTTP_201_CREATED,
           summary="Request a new bot instance to join a meeting",
-          dependencies=[Depends(get_current_user)])
+          dependencies=[Depends(get_user_and_token)])
 async def request_bot(
     req: MeetingCreate,
-    current_user: User = Depends(get_current_user),
+    auth_data: tuple[str, User] = Depends(get_user_and_token),
     db: AsyncSession = Depends(get_db)
 ):
     """Handles requests to launch a new bot container for a meeting.
     Requires a valid API token associated with a user.
     - Constructs the meeting URL from platform and native ID.
     - Creates a Meeting record in the database.
-    - Starts a Docker container for the bot, passing the internal meeting ID and constructed URL.
+    - Starts a Docker container for the bot, passing user token, internal meeting ID, native meeting ID, and constructed URL.
     - Updates the Meeting record with container details and status.
     - Returns the created Meeting details.
     """
+    # Unpack the token and user from the dependency result
+    user_token, current_user = auth_data
+
     logger.info(f"Received bot request for platform '{req.platform.value}' with native ID '{req.native_meeting_id}' from user {current_user.id}")
+    native_meeting_id = req.native_meeting_id # Store native_meeting_id for clarity
 
     # 1. Construct meeting URL
-    constructed_url = Platform.construct_meeting_url(req.platform.value, req.native_meeting_id)
+    constructed_url = Platform.construct_meeting_url(req.platform.value, native_meeting_id)
     if not constructed_url:
         # Handle cases where URL construction isn't possible (e.g., Teams, invalid ID format)
         # Depending on policy, either reject or proceed without a URL for the bot if it can handle it
-        logger.warning(f"Could not construct meeting URL for platform {req.platform.value} and ID {req.native_meeting_id}. Proceeding without URL for bot.")
+        logger.warning(f"Could not construct meeting URL for platform {req.platform.value} and ID {native_meeting_id}. Proceeding without URL for bot.")
         # Or raise HTTPException: 
-        # raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Could not construct URL for platform {req.platform.value} with ID {req.native_meeting_id}. Invalid ID or unsupported construction.")
+        # raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Could not construct URL for platform {req.platform.value} with ID {native_meeting_id}. Invalid ID or unsupported construction.")
 
     # 2. Check for existing active meeting for this user/platform/native_id
     existing_meeting_stmt = select(Meeting).where(
         Meeting.user_id == current_user.id,
         Meeting.platform == req.platform.value,
-        Meeting.platform_specific_id == req.native_meeting_id,
+        Meeting.platform_specific_id == native_meeting_id,
         Meeting.status.in_(['requested', 'active'])
     )
     result = await db.execute(existing_meeting_stmt)
     existing_meeting = result.scalars().first()
 
     if existing_meeting:
-        logger.warning(f"User {current_user.id} requested duplicate bot for active/requested meeting {existing_meeting.id} ({req.platform.value} / {req.native_meeting_id})")
+        logger.warning(f"User {current_user.id} requested duplicate bot for active/requested meeting {existing_meeting.id} ({req.platform.value} / {native_meeting_id})")
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail=f"An active or requested meeting already exists for this platform and meeting ID. Meeting ID: {existing_meeting.id}"
@@ -118,27 +122,28 @@ async def request_bot(
     # 3. Create Meeting record in DB
     new_meeting = Meeting(
         user_id=current_user.id,
-        platform=req.platform.value, # Store the string value
-        platform_specific_id=req.native_meeting_id, # Use platform_specific_id instead of native_meeting_id
-        meeting_url=constructed_url, # Use meeting_url instead of constructed_meeting_url
+        platform=req.platform.value,
+        platform_specific_id=native_meeting_id, # Correct field name
         status='requested'
     )
     db.add(new_meeting)
     await db.commit()
     await db.refresh(new_meeting)
-    meeting_id = new_meeting.id # Use internal ID from now on
+    meeting_id = new_meeting.id # Internal DB ID
     logger.info(f"Created meeting record with ID: {meeting_id}")
 
     # 4. Start the bot container
     container_id = None
     try:
-        logger.info(f"Attempting to start bot container for meeting {meeting_id}...") # Log before start
-        # Pass the *constructed* URL to the bot container
+        logger.info(f"Attempting to start bot container for meeting {meeting_id} (native: {native_meeting_id})...")
+        # MODIFY the call to start_bot_container:
         container_id = start_bot_container(
-            meeting_id=meeting_id, # Internal DB ID
-            meeting_url=constructed_url, # Pass the constructed URL (can be None)
-            platform=req.platform.value, # Pass platform string value
+            meeting_id=meeting_id,           # Internal DB ID
+            meeting_url=constructed_url,     # Constructed URL (still pass it to bot if needed)
+            platform=req.platform.value,     # Platform string
             bot_name=req.bot_name,
+            user_token=user_token,           # *** ADDED: Pass the user's API token ***
+            native_meeting_id=native_meeting_id # *** ADDED: Pass the native meeting ID ***
         )
         logger.info(f"Call to start_bot_container completed. Container ID: {container_id}") # Log after start
 
@@ -194,14 +199,17 @@ async def request_bot(
              status_code=status.HTTP_200_OK,
              response_model=MeetingResponse,
              summary="Stop a running bot for a specific meeting using platform and native ID",
-             dependencies=[Depends(get_current_user)])
+             dependencies=[Depends(get_user_and_token)])
 async def stop_bot(
     platform: Platform,
     native_meeting_id: str,
-    current_user: User = Depends(get_current_user),
+    auth_data: tuple[str, User] = Depends(get_user_and_token),
     db: AsyncSession = Depends(get_db)
 ):
     """Stops the bot container associated with the platform and native meeting ID, verifying ownership."""
+    # Unpack the token and user from the dependency result
+    user_token, current_user = auth_data
+
     logger.info(f"User {current_user.id} requested to stop bot for platform '{platform.value}' with native ID: '{native_meeting_id}'")
 
     # 1. Find the *latest* active or requested meeting matching criteria for the user

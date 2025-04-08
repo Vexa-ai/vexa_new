@@ -13,12 +13,12 @@ logger = logging.getLogger("bot_manager.auth")
 API_KEY_HEADER = APIKeyHeader(name="X-API-Key", auto_error=False)
 
 async def get_api_key(api_key: str = Security(API_KEY_HEADER),
-                    db: AsyncSession = Depends(get_db)) -> tuple:
-    """Dependency to verify X-API-Key and return the (APIToken, User) tuple."""
+                    db: AsyncSession = Depends(get_db)) -> tuple[str, User]:
+    """Dependency to verify X-API-Key and return the (api_key_string, User_object) tuple."""
     if not api_key:
         logger.warning("API token missing from header")
         raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN, 
+            status_code=status.HTTP_403_FORBIDDEN,
             detail="Missing API token (X-API-Key header)"
         )
     
@@ -45,40 +45,30 @@ async def get_api_key(api_key: str = Security(API_KEY_HEADER),
         # mock_user = User(id=999, email="mock@example.com", name="Mock User")
         # return (None, mock_user)
     
-    return token_user # Return (APIToken, User) tuple
+    # Extract User object from the result row
+    user_obj = token_user[1] # Assuming User is the second element
+    if not isinstance(user_obj, User):
+         logger.error(f"get_api_key did not retrieve a valid User object: {type(user_obj)}")
+         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Authentication data error")
 
-async def get_current_user(db_token_user: tuple = Depends(get_api_key)) -> User:
-    """Dependency to get the User object from the verified (APIToken, User) tuple."""
-    logger.info(f"get_current_user received: {type(db_token_user)}")
-    if db_token_user is None:
-        logger.error("get_current_user received None from get_api_key")
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Not authenticated")
-        
-    # Handle SQLAlchemy Row objects (from query result)
-    if hasattr(db_token_user, "_mapping"):
-        logger.info("Processing token_user as SQLAlchemy Row object")
-        token = db_token_user[0]  # First item in the row should be the token
-        user = db_token_user[1]   # Second item should be the user
-        
-        if not isinstance(user, User):
-            logger.error(f"get_current_user: user is not a User instance, but {type(user)}")
-            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Authentication error")
-            
-        logger.info(f"Successfully authenticated user ID: {user.id}, email: {user.email}")
-        return user
-    
-    # Original tuple handling
-    if not isinstance(db_token_user, tuple) or len(db_token_user) != 2:
-        logger.error(f"get_current_user received invalid input from get_api_key: {type(db_token_user)}")
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Not authenticated")
-    
-    _token, user = db_token_user
-    if not isinstance(user, User):
-         logger.error(f"get_current_user did not receive a valid User object: {type(user)}")
-         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Authentication error")
-         
-    logger.info(f"Successfully authenticated user ID: {user.id}, email: {user.email}")
-    return user
+    logger.info(f"API key validated for user {user_obj.id}. Returning key string and user object.")
+    # Return the original api_key string and the User object
+    return (api_key, user_obj)
+
+async def get_user_and_token(token_user_tuple: tuple[str, User] = Depends(get_api_key)) -> tuple[str, User]:
+    """Dependency to unpack and provide the (api_key_string, User_object) tuple."""
+    # Basic validation, could add more type checks if needed
+    if not isinstance(token_user_tuple, tuple) or len(token_user_tuple) != 2:
+        logger.error(f"get_user_and_token received invalid input: {type(token_user_tuple)}")
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Authentication processing error")
+    logger.info(f"Providing API key and User object for user {token_user_tuple[1].id}")
+    return token_user_tuple # Return the tuple (api_key_string, User_object)
+
+async def get_current_user(user_and_token: tuple[str, User] = Depends(get_user_and_token)) -> User:
+    """Dependency to get only the User object from the (api_key_string, User) tuple."""
+    _api_key, user = user_and_token # Unpack the tuple
+    logger.info(f"get_current_user providing User object for user {user.id}")
+    return user # Return only the User object
 
 # --- Remove Admin Auth --- 
 # async def verify_admin_token(admin_token: str = Security(API_KEY_HEADER)):

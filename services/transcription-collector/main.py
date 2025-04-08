@@ -10,7 +10,7 @@ from sqlalchemy import select, and_, func, distinct, text
 from fastapi.security.api_key import APIKeyHeader
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import joinedload
-from typing import Optional, List
+from typing import Optional, List, Dict
 from pydantic import ValidationError
 
 from shared_models.database import get_db, init_db
@@ -22,9 +22,8 @@ from shared_models.schemas import (
     MeetingResponse,
     MeetingListResponse,
     TranscriptionResponse,
-    TranscriptionData,
-    TranscriptionRequest,
-    Platform
+    Platform,
+    WhisperLiveData
 )
 from filters import TranscriptionFilter
 
@@ -102,75 +101,122 @@ async def shutdown():
     logger.info("Application shutting down, connections closed")
 
 @app.websocket("/collector")
-async def websocket_endpoint(websocket: WebSocket):
+async def websocket_endpoint(websocket: WebSocket, db: AsyncSession = Depends(get_db)):
     await websocket.accept()
-    
-    # Generate unique server ID for this connection
-    server_id = str(uuid.uuid4())
-    logger.info(f"WhisperLive server {server_id} connected")
-    
+    connection_id = str(uuid.uuid4()) # Unique ID for this connection instance
+    logger.info(f"WebSocket connection {connection_id} accepted.")
+
     try:
         while True:
             data = await websocket.receive_text()
-            # First try to parse as TranscriptionData (meeting_id based)
+            logger.info(f"[{connection_id}] RAW Data Received: {data}") # Log raw data
+
             try:
-                # Assume bots send TranscriptionData with internal meeting_id
-                transcription_data = TranscriptionData.parse_raw(data)
-                logger.info(f"Received TranscriptionData for meeting {transcription_data.meeting_id}")
-                # Process using internal meeting ID
-                await process_transcription(transcription_data, server_id)
-                
-            # --- Improved Error Handling --- 
+                # Attempt to parse the message using the combined WhisperLiveData schema
+                whisper_data = WhisperLiveData.parse_raw(data)
+                logger.info(f"[{connection_id}] Parsed WhisperLiveData: platform={whisper_data.platform.value}, native_id={whisper_data.meeting_id}, token={whisper_data.token[:5]}..., segments={len(whisper_data.segments)}")
+
+                # 1. Validate Token and Get User
+                try:
+                    user = await get_user_by_token(whisper_data.token, db)
+                    if not user: raise ValueError("User not found for token") # Should be handled by HTTPException in helper
+                    logger.info(f"[{connection_id}] Token validated for user {user.id}")
+                except HTTPException as auth_exc:
+                    logger.warning(f"[{connection_id}] Auth failed for incoming data: {auth_exc.detail}")
+                    # Decide if we close connection or just skip processing this batch
+                    # Closing might be safer if auth fails.
+                    await websocket.close(code=status.WS_1008_POLICY_VIOLATION, reason=f"Authentication Failed: {auth_exc.detail}")
+                    return # Exit loop and close
+
+                # 2. Find Internal Meeting ID
+                stmt_meeting = select(Meeting).where(
+                    Meeting.user_id == user.id,
+                    Meeting.platform == whisper_data.platform.value,
+                    Meeting.platform_specific_id == whisper_data.meeting_id # Match native ID from message
+                ).order_by(Meeting.created_at.desc())
+
+                result_meeting = await db.execute(stmt_meeting)
+                meeting = result_meeting.scalars().first()
+
+                if not meeting:
+                    logger.warning(f"[{connection_id}] Meeting lookup failed: No meeting found for user {user.id}, platform '{whisper_data.platform.value}', native ID '{whisper_data.meeting_id}'")
+                    # Decide whether to close or just log and skip processing
+                    # Sending error back might cause issues if WhisperLive doesn't expect it
+                    continue # Skip processing this message if meeting not found
+
+                internal_meeting_id = meeting.id
+                logger.info(f"[{connection_id}] Associated internal meeting ID: {internal_meeting_id}")
+
+                # 3. Process Segments if meeting found
+                if whisper_data.segments: # Check if there are segments in this message
+                    await process_transcription(
+                        internal_meeting_id=internal_meeting_id,
+                        segments=whisper_data.segments,
+                        server_id=connection_id, # Pass connection ID for logging
+                        db=db # <<< Pass the db session from the endpoint dependency
+                    )
+                else:
+                     logger.info(f"[{connection_id}] Received WhisperLiveData message for meeting {internal_meeting_id} with no segments.")
+
             except (json.JSONDecodeError, ValidationError) as parse_error:
-                # If parsing as TranscriptionData fails, log and try TranscriptionRequest
-                logger.warning(f"Failed to parse incoming WebSocket data as TranscriptionData for server {server_id}: {parse_error}. Data: {data[:200]}")
-                # Optionally, send error back to websocket
-                try:
-                    await websocket.send_json({"status": "error", "message": f"Invalid data format: {parse_error}"})
-                except Exception as ws_send_err:
-                    logger.error(f"Failed to send parse error to WebSocket {server_id}: {ws_send_err}")
-            except Exception as data_process_err: # Catch errors from process_transcription
-                logger.error(f"Error during process_transcription for server {server_id}: {data_process_err}", exc_info=True)
-                try:
-                    await websocket.send_json({"status": "error", "message": f"Processing error: {str(data_process_err)}"})
-                except Exception as ws_send_err:
-                    logger.error(f"Failed to send processing error to WebSocket {server_id}: {ws_send_err}")
-                    
+                logger.warning(f"[{connection_id}] Failed to parse WhisperLiveData: {parse_error}. Data: {data[:500]}...") # Log more data on error
+                # Don't close connection for parse errors, just log and wait for next message
+                # Optionally send error back if WhisperLive client handles it:
+                # try:
+                #     await websocket.send_json({"status": "error", "message": f"Invalid data format: {parse_error}"})
+                # except Exception: pass
+            except Exception as process_err:
+                # Catch errors during token validation or DB lookup *after* parsing
+                logger.error(f"[{connection_id}] Error processing WhisperLiveData for native_id {whisper_data.meeting_id if 'whisper_data' in locals() else 'unknown'}: {process_err}", exc_info=True)
+                # Decide if connection should be closed on processing errors
+
     except WebSocketDisconnect:
-        logger.info(f"WhisperLive server {server_id} disconnected")
+        logger.info(f"WebSocket connection {connection_id} disconnected.")
     except Exception as e:
-        logger.error(f"Unhandled error in websocket connection with server {server_id}: {e}", exc_info=True)
+        logger.error(f"Unhandled error in websocket connection {connection_id}: {e}", exc_info=True)
         # Attempt to close gracefully if possible
         try:
             await websocket.close(code=status.WS_1011_INTERNAL_ERROR)
         except Exception:
             pass # Ignore errors during close after another error
+    finally:
+        # No connection-specific context to clean up anymore
+        logger.info(f"WebSocket connection {connection_id} handler finished.")
 
-async def process_transcription(data: TranscriptionData, server_id: str):
-    """Process incoming transcription data (with internal meeting_id) from WhisperLive."""
-    meeting_id = data.meeting_id
-    segments = data.segments
+# MODIFY process_transcription signature to accept db session
+async def process_transcription(internal_meeting_id: int, segments: List[TranscriptionSegment], server_id: str, db: AsyncSession):
+    """Process incoming transcription segments for a validated internal meeting ID."""
+    # meeting_id is now passed directly
+    # segments are passed directly
+    # db session is now passed directly
     
-    if not meeting_id:
-        logger.error(f"Received TranscriptionData without meeting_id from server {server_id}")
+    if not internal_meeting_id:
+        logger.error(f"[{server_id}] process_transcription called without internal_meeting_id")
+        return
+    if not segments:
+        logger.info(f"[{server_id}] process_transcription called with no segments for meeting {internal_meeting_id}. Nothing to process.")
         return
 
     # Enhanced logging
-    logger.info(f"Processing {len(segments)} segments for meeting_id={meeting_id} from server {server_id}")
+    logger.info(f"[{server_id}] Processing {len(segments)} segments for internal_meeting_id={internal_meeting_id}")
     
     # Log a sample of the first segment if available
-    if segments and len(segments) > 0:
+    if segments: # Check if segments list is not empty
         sample_segment = segments[0]
-        logger.info(f"Sample segment for meeting {meeting_id}: start={sample_segment.start_time}, end={sample_segment.end_time}, text='{sample_segment.text[:50]}...' if len(sample_segment.text) > 50 else sample_segment.text")
+        logger.info(f"[{server_id}] Sample segment for meeting {internal_meeting_id}: start={sample_segment.start_time}, end={sample_segment.end_time}, text='{sample_segment.text[:50]}...' if len(sample_segment.text) > 50 else sample_segment.text")
+    else:
+        logger.info(f"[{server_id}] Received empty segment list for meeting {internal_meeting_id}")
     
-    async with get_db() as db:
-        # Check if meeting exists (optional, depends on whether bot guarantees existence)
-        meeting = await db.get(Meeting, meeting_id)
+    # REMOVE async with get_db(), use passed-in db directly
+    # async with get_db() as db:
+    try: # Add try/except block for operations using the passed db session
+        # Check if meeting exists (still a good safety check)
+        meeting = await db.get(Meeting, internal_meeting_id)
         if not meeting:
-            logger.warning(f"Meeting with id={meeting_id} not found. Cannot store segments.")
+            logger.warning(f"[{server_id}] Meeting with internal id={internal_meeting_id} not found. Cannot store segments.")
             return
         
-        logger.info(f"Found meeting record: id={meeting.id}, platform={meeting.platform}, url={meeting.meeting_url}")
+        logger.info(f"[{server_id}] Found meeting record: id={meeting.id}, platform={meeting.platform}, native_id={meeting.platform_specific_id}")
 
         new_segments_to_store = []
         processed_count = 0
@@ -178,20 +224,19 @@ async def process_transcription(data: TranscriptionData, server_id: str):
 
         for segment in segments:
             if not segment.text or segment.start_time is None or segment.end_time is None:
-                logger.debug(f"Skipping segment with missing data for meeting {meeting_id}")
+                logger.debug(f"[{server_id}] Skipping segment with missing data for meeting {internal_meeting_id}")
                 continue
             
-            # Redis key for deduplication (internal meeting ID is sufficient)
-            segment_key = f"segment:{meeting_id}:{segment.start_time:.3f}:{segment.end_time:.3f}"
+            # Redis key for deduplication uses internal meeting ID
+            segment_key = f"segment:{internal_meeting_id}:{segment.start_time:.3f}:{segment.end_time:.3f}"
             exists = await redis_client.get(segment_key)
 
             if not exists:
                 await redis_client.setex(segment_key, 300, "processed") # Simple flag is enough
                 
-                if transcription_filter.filter_segment(segment.text):
-                    # Use simplified function to create ORM object
+                if transcription_filter.filter_segment(segment.text, language=(segment.language or 'en')):
                     new_transcription = create_transcription_object(
-                        meeting_id=meeting_id,
+                        meeting_id=internal_meeting_id,
                         start=segment.start_time,
                         end=segment.end_time,
                         text=segment.text,
@@ -201,20 +246,27 @@ async def process_transcription(data: TranscriptionData, server_id: str):
                     processed_count += 1
                 else:
                     filtered_count += 1
-                    logger.debug(f"Filtered out segment for meeting {meeting_id}: '{segment.text}'")
+                    logger.debug(f"[{server_id}] Filtered out segment for meeting {internal_meeting_id}: '{segment.text}'")
             else:
-                logger.debug(f"Skipping duplicate segment for meeting {meeting_id} based on Redis key: {segment_key}")
+                logger.debug(f"[{server_id}] Skipping duplicate segment for meeting {internal_meeting_id} based on Redis key: {segment_key}")
         
         if new_segments_to_store:
-            try:
-                db.add_all(new_segments_to_store)
-                await db.commit()
-                logger.info(f"Stored {processed_count} new segments (filtered {filtered_count}) for meeting {meeting_id}")
-            except Exception as e:
-                await db.rollback()
-                logger.error(f"Error storing batch of segments for meeting {meeting_id}: {e}", exc_info=True)
+            # Use the passed-in db session
+            db.add_all(new_segments_to_store)
+            await db.commit()
+            logger.info(f"[{server_id}] Stored {processed_count} new segments (filtered {filtered_count}) for meeting {internal_meeting_id}")
         else:
-            logger.info(f"No new, non-duplicate, informative segments to store for meeting {meeting_id}")
+            logger.info(f"[{server_id}] No new, non-duplicate, informative segments to store for meeting {internal_meeting_id}")
+
+    except Exception as e:
+        # Handle potential exceptions during DB operations with the passed session
+        logger.error(f"[{server_id}] Error during database operation in process_transcription for meeting {internal_meeting_id}: {e}", exc_info=True)
+        try:
+            await db.rollback() # Rollback the passed-in session
+        except Exception as rb_err:
+            logger.error(f"[{server_id}] Failed to rollback database session: {rb_err}")
+        # Re-raising might be appropriate depending on desired error handling in websocket_endpoint
+        # raise e 
 
 # Simplified function - assumes meeting_id is valid
 def create_transcription_object(meeting_id: int, start: float, end: float, text: str, language: Optional[str]) -> Transcription:
@@ -320,6 +372,25 @@ async def get_transcript_by_native_id(
     response_data["segments"] = segment_details # Add segments list
 
     return TranscriptionResponse(**response_data)
+
+# ADD Helper for token validation (or ensure it exists in an auth.py)
+async def get_user_by_token(token: str, db: AsyncSession) -> Optional[User]:
+    """Validates an API token and returns the associated User or raises HTTPException."""
+    if not token:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Missing API token")
+    
+    result = await db.execute(
+        select(User).join(APIToken).where(APIToken.token == token)
+    )
+    user = result.scalars().first()
+    
+    if not user:
+        logger.warning(f"Invalid API token provided in WebSocket handshake: {token[:5]}...")
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Invalid API token"
+        )
+    return user
 
 if __name__ == "__main__":
     import uvicorn

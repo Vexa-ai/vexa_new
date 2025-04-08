@@ -3,6 +3,8 @@ from sqlalchemy import (Column, String, Text, Integer, DateTime, Float, ForeignK
 from sqlalchemy.sql import func
 from sqlalchemy.orm import declarative_base, relationship
 from datetime import datetime # Needed for Transcription model default
+from shared_models.schemas import Platform # Import Platform for the static method
+from typing import Optional # Added for the return type hint in constructed_meeting_url
 
 # Define the base class for declarative models
 Base = declarative_base()
@@ -34,8 +36,6 @@ class Meeting(Base):
     platform = Column(String(100), nullable=False) # e.g., 'google_meet', 'zoom'
     # Database column name is platform_specific_id but we use native_meeting_id in the code
     platform_specific_id = Column(String(255), index=True, nullable=True)
-    # Database column name is meeting_url but we use constructed_meeting_url in the code
-    meeting_url = Column(Text, nullable=True)
     status = Column(String(50), nullable=False, default='requested', index=True)
     bot_container_id = Column(String(255), nullable=True)
     start_time = Column(DateTime, nullable=True)
@@ -59,12 +59,11 @@ class Meeting(Base):
         self.platform_specific_id = value
         
     @property
-    def constructed_meeting_url(self):
-        return self.meeting_url
-        
-    @constructed_meeting_url.setter
-    def constructed_meeting_url(self, value):
-        self.meeting_url = value
+    def constructed_meeting_url(self) -> Optional[str]: # Added return type hint
+        # Calculate the URL on demand using the static method from schemas.py
+        if self.platform and self.platform_specific_id:
+             return Platform.construct_meeting_url(self.platform, self.platform_specific_id)
+        return None
 
 class Transcription(Base):
     __tablename__ = "transcriptions"
@@ -82,11 +81,3 @@ class Transcription(Base):
     
     # Index for efficient querying by meeting_id and start_time
     __table_args__ = (Index('ix_transcription_meeting_start', 'meeting_id', 'start_time'),)
-
-# Example of a Meeting model if needed:
-# class Meeting(Base):
-#     __tablename__ = "meetings"
-#     id = Column(Integer, primary_key=True, index=True)
-#     platform = Column(String(100), nullable=False)
-#     meeting_url = Column(Text, unique=True, nullable=False)
-#     # Add created_at, updated_at etc. 

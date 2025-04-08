@@ -1,4 +1,5 @@
-version: '3.8'
+name: vexa
+# version: '3.8' # Removed obsolete version
 
 services:
   api-gateway:
@@ -19,6 +20,8 @@ services:
         condition: service_started
       transcription-collector:
         condition: service_started
+    networks:
+      - vexa_default
     restart: unless-stopped
 
   admin-api:
@@ -42,6 +45,8 @@ services:
         condition: service_started
       postgres:
         condition: service_healthy
+    networks:
+      - vexa_default
     restart: unless-stopped
 
   bot-manager:
@@ -51,7 +56,7 @@ services:
     environment:
       - REDIS_URL=redis://redis:6379/0
       - BOT_IMAGE=vexa-bot:latest
-      - DOCKER_NETWORK=vexa_default
+      - DOCKER_NETWORK=vexa_vexa_default
       - LOG_LEVEL=DEBUG
       - DB_HOST=postgres
       - DB_PORT=5432
@@ -66,6 +71,8 @@ services:
         condition: service_started
       postgres:
         condition: service_healthy
+    networks:
+      - vexa_default
     restart: unless-stopped
 
   whisperlive:
@@ -90,6 +97,8 @@ services:
     depends_on:
       transcription-collector:
         condition: service_started
+    networks:
+      - vexa_default
     restart: unless-stopped
 
   transcription-collector:
@@ -112,12 +121,16 @@ services:
         condition: service_started
       postgres:
         condition: service_healthy
+    networks:
+      - vexa_default
     restart: unless-stopped
 
   redis:
     image: redis:7.0-alpine
     volumes:
       - redis-data:/data
+    networks:
+      - vexa_default
     restart: unless-stopped
 
   postgres:
@@ -133,6 +146,8 @@ services:
       interval: 5s
       timeout: 5s
       retries: 5
+    networks:
+      - vexa_default
     restart: unless-stopped
 
     ports:
@@ -141,3 +156,7 @@ services:
 volumes:
   redis-data:
   postgres-data:
+
+networks:
+  vexa_default:
+    driver: bridge

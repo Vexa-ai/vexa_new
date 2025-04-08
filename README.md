@@ -57,7 +57,9 @@ docker-compose up -d
     *   **Main API:** `http://localhost:8056` (API Gateway)
     *   **Admin API (Direct Dev Access):** `http://localhost:8057`
     *   **WhisperLive (Debug):** `http://localhost:9090`
-    Internal services (Bot Manager, Transcription Collector, Redis, Postgres) communicate over the Docker network and are not directly exposed by default.
+    *   **Transcription Collector (Debug):** `http://localhost:8123` (Maps to container port 8000)
+    *   **PostgreSQL (Direct Dev Access):** `localhost:5438` (Maps to container port 5432)
+    Internal services (Bot Manager, Transcription Collector, Redis, Postgres) communicate over the Docker network and are not directly exposed by default (except for the debug/direct access ports listed above).
 
 6.  **Check Status:**
 ```bash
@@ -77,8 +79,8 @@ docker-compose ps
 
 ### API Usage (Development)
 
-*   **Admin Operations:** Access via `http://localhost:8057` or `http://localhost:8056/admin/...`. Requires the `X-Admin-API-Key` header (value set in `docker-compose.yml` `admin-api.environment.ADMIN_API_TOKEN`).
-    *   Example: `curl -H "X-Admin-API-Key: supersecretadmintoken" http://localhost:8057/admin/users`
+*   **Admin Operations:** Access via `http://localhost:8057` or `http://localhost:8056/admin/...`. Requires the `X-Admin-API-Key` header (value set as `ADMIN_API_TOKEN` in the project's `.env` file, which is used by `docker-compose.yml`).
+    *   Example: `curl -H "X-Admin-API-Key: YOUR_ADMIN_TOKEN_FROM_DOTENV" http://localhost:8057/admin/users`
 *   **Client Operations:** Access via the gateway `http://localhost:8056`. Requires the `X-API-Key` header (value corresponds to a token generated via the admin API).
     *   Example (Request Bot):
 ```bash

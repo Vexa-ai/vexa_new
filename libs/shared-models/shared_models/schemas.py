@@ -186,7 +186,7 @@ class TranscriptionSegment(BaseModel):
     end_time: float = Field(..., alias='end')     # Add alias
     text: str
     language: Optional[str]
-    # created_at: Optional[datetime] # Not usually needed in response lists
+    created_at: Optional[datetime]
     speaker: Optional[str] = None
 
     class Config:

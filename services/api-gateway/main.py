@@ -189,16 +189,26 @@ async def root():
          tags=["Bot Management"],
          summary="Request a new bot to join a meeting",
          description="Creates a new meeting record and launches a bot instance based on platform and native meeting ID.",
-         # response_model=MeetingResponse, # Response comes from downstream
+         # response_model=MeetingResponse, # Response comes from downstream, keep commented
          status_code=status.HTTP_201_CREATED,
          dependencies=[Depends(api_key_scheme)],
-         # Explicitly define the request body using a generic Dict for docs, avoiding gateway validation
-         # openapi_extra is removed as body parameter implies request body
-         )
+         # Explicitly define the request body schema for OpenAPI documentation
+         openapi_extra={
+             "requestBody": {
+                 "content": {
+                     "application/json": {
+                         "schema": MeetingCreate.schema()
+                     }
+                 },
+                 "required": True,
+                 "description": "Specify the meeting platform, native ID, and optional bot name."
+             },
+         })
+# Function signature remains generic for forwarding
 async def request_bot_proxy(request: Request, body: Dict[str, Any]): 
     """Forward request to Bot Manager to start a bot."""
     url = f"{BOT_MANAGER_URL}/bots"
-    # forward_request already handles reading and passing the body from the original request
+    # forward_request handles reading and passing the body from the original request
     return await forward_request(app.state.http_client, "POST", url, request)
 
 @app.delete("/bots/{platform}/{native_meeting_id}",

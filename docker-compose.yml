@@ -73,11 +73,11 @@ services:
       context: .
       dockerfile: services/WhisperLive/Dockerfile.project
     volumes:
-      - whisper-model-data:/root/.cache/faster_whisper
+      - ./hub:/root/.cache/huggingface/hub
       - ./services/WhisperLive/models:/app/models
     environment:
       - TRANSCRIPTION_COLLECTOR_URL=ws://transcription-collector:8000/collector
-    command:  ["--port", "9090", "--backend", "faster_whisper", "-fw", "/app/models/small/snapshots/536b0662742c02347bc0e980a01041f333bce120"]
+    command:  ["--port", "9090", "--backend", "faster_whisper", "-fw", "/root/.cache/huggingface/hub/models--Systran--faster-whisper-medium/snapshots/08e178d48790749d25932bbc082711ddcfdfbc4f"]
     ports:
       - "9090:9090"
     deploy:
@@ -141,4 +141,3 @@ services:
 volumes:
   redis-data:
   postgres-data:
-  whisper-model-data:

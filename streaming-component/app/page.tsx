@@ -1,26 +1,6 @@
-'use client'; // Required for hooks like useState
-
-import MicrophoneStreamer from '@/components/MicrophoneStreamer'; // Adjust alias if needed
-import { useState } from 'react';
 import Image from "next/image";
 
 export default function Home() {
-  // Example: Define the configuration needed by your server
-  // Replace with your actual token, desired meeting ID etc.
-  const streamerConfig = {
-    language: null,
-    task: "transcribe",
-    model: "medium", // Or small, large etc.
-    use_vad: true,
-    platform: "web_mic", // Example platform identifier
-    token: "4l3OzYPG2Xw2FvlSG5ClcfoFpEfFeAa1SRLvCzXB", // <-- Replace with real token
-    meeting_id: "web_mic_test_001", // Example meeting/stream identifier
-    meeting_url: "mic_stream" // Or another non-null placeholder string
-  };
-
-  // Example: Get WebSocket URL (could be from env vars)
-  const wsUrl = process.env.NEXT_PUBLIC_WHISPER_WS_URL || 'ws://localhost:9090';
-
   return (
     <div className="grid grid-rows-[20px_1fr_20px] items-center justify-items-center min-h-screen p-8 pb-20 gap-16 sm:p-20 font-[family-name:var(--font-geist-sans)]">
       <main className="flex flex-col gap-[32px] row-start-2 items-center sm:items-start">
@@ -70,12 +50,6 @@ export default function Home() {
             Read our docs
           </a>
         </div>
-
-        {/* Pass the configuration as props */}
-        <MicrophoneStreamer
-          websocketUrl={wsUrl}
-          initialConfig={streamerConfig}
-        />
       </main>
       <footer className="row-start-3 flex gap-[24px] flex-wrap items-center justify-center">
         <a

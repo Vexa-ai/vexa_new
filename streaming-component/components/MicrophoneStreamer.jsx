@@ -1,13 +1,7 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
 
-// Import shadcn components
-import { Button } from "@/components/ui/button"; // Adjust alias if needed
-import { Card, CardHeader, CardTitle, CardDescription, CardContent, CardFooter } from "@/components/ui/card"; // Adjust alias
-import { Badge } from "@/components/ui/badge"; // Adjust alias
-import { ScrollArea } from "@/components/ui/scroll-area"; // Adjust alias
-
-// --- Configuration (Defaults if props not provided) ---
-const DEFAULT_WEBSOCKET_URL = 'ws://localhost:9090'; 
+// --- Configuration ---
+const WEBSOCKET_URL = 'ws://localhost:9090'; // Use ws:// or wss:// as appropriate
 const TARGET_SAMPLE_RATE = 16000;
 const SCRIPT_PROCESSOR_BUFFER_SIZE = 4096; // Adjust buffer size as needed (powers of 2)
 
@@ -58,20 +52,7 @@ function resampleBuffer(audioBuffer, targetSampleRate) {
 
 
 // --- React Component ---
-// Accept props for configuration
-function MicrophoneStreamer({ 
-  websocketUrl = DEFAULT_WEBSOCKET_URL, 
-  initialConfig = { // Default example config, adjust as needed!
-    language: null,
-    task: "transcribe",
-    model: "medium",
-    use_vad: true,
-    // platform: "web_mic", 
-    // token: "YOUR_API_TOKEN", 
-    // meeting_id: "mic_default_id", 
-    // meeting_url: null
-  }
-}) {
+function MicrophoneStreamer() {
   const [isRecording, setIsRecording] = useState(false);
   const [status, setStatus] = useState('Idle');
   const [error, setError] = useState(null);
@@ -170,19 +151,26 @@ function MicrophoneStreamer({
 
       setStatus('Connecting WS...');
 
-      // 3. Set up WebSocket using the prop URL
-      const ws = new WebSocket(websocketUrl); // Use prop
+      // 3. Set up WebSocket
+      const ws = new WebSocket(WEBSOCKET_URL);
       socketRef.current = ws;
 
       ws.onopen = () => {
         console.log('WebSocket connection opened.');
         setStatus('WS Connected, Sending Config...');
 
-        // Send initial configuration message using props
-        // Merge the passed initialConfig with the generated uid
+        // Send initial configuration message
         const configMessage = {
           uid: clientUidRef.current,
-          ...initialConfig // Spread the prop config here
+          language: null,         // Let backend detect language
+          task: "transcribe",
+          model: "medium",        // Example model size
+          use_vad: true,          // Example VAD setting
+          // Add other fields if your specific server requires them (platform, token etc.)
+          // platform: "web_mic",
+          // token: "your_dummy_token",
+          // meeting_id: "mic_stream_" + clientUidRef.current,
+          // meeting_url: null
         };
         try {
             ws.send(JSON.stringify(configMessage));
@@ -196,6 +184,8 @@ function MicrophoneStreamer({
                 try {
                   const inputBuffer = event.inputBuffer;
                   const resampledData = resampleBuffer(inputBuffer, TARGET_SAMPLE_RATE);
+
+                  // Send the resampled audio data as binary
                   socketRef.current.send(resampledData.buffer);
                 } catch (processErr) {
                    console.error("Error in onaudioprocess:", processErr);
@@ -285,69 +275,30 @@ function MicrophoneStreamer({
         console.log("Component unmounting, ensuring cleanup.");
         stopRecording('Unmounted');
     };
-  }, []); // <<< REMOVE stopRecording from dependency array
-
-  // Function to determine badge color based on status
-  const getBadgeVariant = () => {
-    switch (status) {
-      case 'Recording...':
-        return 'destructive'; // Red for recording
-      case 'Idle':
-      case 'Stopped':
-      case 'Unmounted':
-      case 'Disconnected':
-        return 'outline'; // Default/outline for idle/stopped
-      case 'Error':
-        return 'destructive'; // Red for error
-      case 'Connecting WS...':
-      case 'Mic Access Granted':
-      case 'Requesting Mic...':
-      case 'WS Connected, Sending Config...':
-        return 'secondary'; // Secondary color for intermediate states
-      default:
-        return 'default';
-    }
-  };
+  }, [stopRecording]); // Add stopRecording as dependency
 
   return (
-    <Card className="w-full max-w-md mx-auto">
-      <CardHeader>
-        <CardTitle className="text-lg font-semibold">Microphone Streamer</CardTitle>
-        <div className="flex items-center space-x-2 pt-1">
-            <span className="text-sm text-muted-foreground">Status:</span>
-            <Badge variant={getBadgeVariant()}>{status}</Badge>
-        </div>
-      </CardHeader>
-      <CardContent className="space-y-4">
-        {error && (
-            <Badge variant="destructive" className="w-full justify-center whitespace-normal h-auto py-2">
-             Error: {error}
-            </Badge>
-        )}
-         <div>
-            <h3 className="mb-2 font-medium text-sm text-muted-foreground">Live Transcript</h3>
-            <ScrollArea className="h-48 w-full rounded-md border p-3 text-sm">
-                 {transcript.length === 0 && status !== 'Recording...' && (
-                     <p className="text-muted-foreground italic">Waiting for transcript...</p>
-                 )}
-                 {transcript.map((text, index) => (
-                    <p key={index} className="mb-1">{text}</p>
-                 ))}
-                 {/* Optional: Add a ref and scroll to bottom */} 
-            </ScrollArea>
-        </div>
-      </CardContent>
-      <CardFooter className="flex justify-center space-x-4">
-        <Button onClick={handleStartRecording} disabled={isRecording} variant="outline">
-          {/* Optional: Add Icons */} 
+    <div>
+      <h2>Microphone Streamer</h2>
+      <p>Status: {status}</p>
+      <div>
+        <button onClick={handleStartRecording} disabled={isRecording}>
           Start Recording
-        </Button>
-        <Button onClick={() => stopRecording()} disabled={!isRecording} variant="destructive">
-           {/* Optional: Add Icons */} 
+        </button>
+        <button onClick={() => stopRecording()} disabled={!isRecording}>
           Stop Recording
-        </Button>
-      </CardFooter>
-    </Card>
+        </button>
+      </div>
+      {error && <p style={{ color: 'red' }}>Error: {error}</p>}
+      <div>
+        <h3>Live Transcript (Simple):</h3>
+        <div style={{ height: '200px', overflowY: 'scroll', border: '1px solid #ccc', padding: '5px', marginTop: '10px' }}>
+          {transcript.map((text, index) => (
+            <p key={index}>{text}</p>
+          ))}
+        </div>
+      </div>
+    </div>
   );
 }
 

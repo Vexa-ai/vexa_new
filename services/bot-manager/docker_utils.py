@@ -92,7 +92,14 @@ def close_docker_client(): # Keep name for compatibility in main.py
             logger.warning(f"Error closing requests_unixsocket session: {e}")
         _socket_session = None
 
-def start_bot_container(meeting_id: int, meeting_url: Optional[str], platform: str, bot_name: Optional[str] = None) -> Optional[str]:
+def start_bot_container(
+    meeting_id: int,
+    meeting_url: Optional[str],
+    platform: str, # External name (e.g., google_meet)
+    bot_name: Optional[str],
+    user_token: str, # *** ADDED ***
+    native_meeting_id: str # *** ADDED ***
+) -> Optional[str]:
     """Starts a vexa-bot container using requests_unixsocket.
     
     Args:
@@ -100,6 +107,8 @@ def start_bot_container(meeting_id: int, meeting_url: Optional[str], platform: s
         meeting_url: The *constructed* meeting URL (can be None).
         platform: The platform string (e.g., 'google_meet').
         bot_name: Optional name for the bot.
+        user_token: The API token of the user requesting the bot. # *** ADDED doc ***
+        native_meeting_id: The platform-specific meeting ID (e.g., 'xyz-abc-pdq'). # *** ADDED doc ***
         
     Returns:
         The container ID if successful, None otherwise.
@@ -113,20 +122,16 @@ def start_bot_container(meeting_id: int, meeting_url: Optional[str], platform: s
     if not bot_name:
         bot_name = f"VexaBot-{uuid.uuid4().hex[:6]}"
 
-    # Map platform from API format to bot format using the Platform enum helper
-    bot_platform = Platform.get_bot_name(platform)
-
-    logger.info(f"Converting platform '{platform}' to bot platform '{bot_platform}'")
-
-    # Construct BOT_CONFIG JSON
+    # Construct BOT_CONFIG JSON - Use external platform name directly
     bot_config_data = {
-        "meeting_id": meeting_id, # Pass internal DB ID
-        "platform": bot_platform,
-        "meetingUrl": meeting_url, # Pass the potentially None constructed URL
+        "meeting_id": meeting_id,         # Keep internal ID 
+        "platform": platform,             # Use original external platform name
+        "meetingUrl": meeting_url,
         "botName": bot_name,
-        "token": "",  # Added: Default empty string
-        "connectionId": "", # Added: Default empty string
-        "automaticLeave": { # Added: Default timeouts
+        "token": user_token,              # Use the passed user_token
+        "nativeMeetingId": native_meeting_id, # Use the passed native_meeting_id
+        "connectionId": "",               # Keep default empty string for now
+        "automaticLeave": {
             "waitingRoomTimeout": 300000,
             "noOneJoinedTimeout": 300000,
             "everyoneLeftTimeout": 300000
@@ -134,7 +139,7 @@ def start_bot_container(meeting_id: int, meeting_url: Optional[str], platform: s
     }
     bot_config_json = json.dumps(bot_config_data)
 
-    logger.info(f"Bot config: {bot_config_json}")
+    logger.info(f"Bot config: {bot_config_json}") # Log the full config
 
     environment = [
         f"BOT_CONFIG={bot_config_json}",

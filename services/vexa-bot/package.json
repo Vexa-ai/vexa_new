@@ -1,5 +1,0 @@
-{
-  "private": true,
-  "workspaces": ["core", "cli"]
-}
-

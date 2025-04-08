@@ -55,7 +55,8 @@ async def init_db():
         async with engine.begin() as conn:
             # This relies on all SQLAlchemy models being imported 
             # somewhere before this runs, so Base.metadata is populated.
-            await conn.run_sync(Base.metadata.create_all)
+            # Add checkfirst=True to prevent errors if tables already exist
+            await conn.run_sync(Base.metadata.create_all, checkfirst=True)
         logger.info("Database tables checked/created successfully.")
     except Exception as e:
         logger.error(f"Error initializing database tables: {e}", exc_info=True)

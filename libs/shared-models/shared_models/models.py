@@ -1,7 +1,7 @@
 import sqlalchemy
-from sqlalchemy import (Column, String, Text, Integer, DateTime, Float, ForeignKey)
+from sqlalchemy import (Column, String, Text, Integer, DateTime, Float, ForeignKey, Index)
 from sqlalchemy.sql import func
-from sqlalchemy.orm import declarative_base
+from sqlalchemy.orm import declarative_base, relationship
 from datetime import datetime # Needed for Transcription model default
 
 # Define the base class for declarative models
@@ -14,32 +14,74 @@ class User(Base):
     name = Column(String(100))
     image_url = Column(Text)
     created_at = Column(DateTime, server_default=func.now())
+    
+    meetings = relationship("Meeting", back_populates="user")
+    api_tokens = relationship("APIToken", back_populates="user")
 
 class APIToken(Base):
     __tablename__ = "api_tokens"
     id = Column(Integer, primary_key=True, index=True) # Added index=True
     token = Column(String(255), unique=True, index=True, nullable=False)
-    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
     created_at = Column(DateTime, server_default=func.now())
-    # user = relationship("User", back_populates="tokens") # Define relationship if needed
+    
+    user = relationship("User", back_populates="api_tokens")
+
+class Meeting(Base):
+    __tablename__ = "meetings"
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    platform = Column(String(100), nullable=False) # e.g., 'google_meet', 'zoom'
+    # Database column name is platform_specific_id but we use native_meeting_id in the code
+    platform_specific_id = Column(String(255), index=True, nullable=True)
+    # Database column name is meeting_url but we use constructed_meeting_url in the code
+    meeting_url = Column(Text, nullable=True)
+    status = Column(String(50), nullable=False, default='requested', index=True)
+    bot_container_id = Column(String(255), nullable=True)
+    start_time = Column(DateTime, nullable=True)
+    end_time = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, server_default=func.now())
+    updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
+
+    user = relationship("User", back_populates="meetings")
+    transcriptions = relationship("Transcription", back_populates="meeting")
+
+    # Optional: Unique constraint on user_id + platform + native_meeting_id
+    # __table_args__ = (UniqueConstraint('user_id', 'platform', 'native_meeting_id', name='_user_platform_native_id_uc'),)
+
+    # Add property getters/setters for compatibility
+    @property
+    def native_meeting_id(self):
+        return self.platform_specific_id
+        
+    @native_meeting_id.setter
+    def native_meeting_id(self, value):
+        self.platform_specific_id = value
+        
+    @property
+    def constructed_meeting_url(self):
+        return self.meeting_url
+        
+    @constructed_meeting_url.setter
+    def constructed_meeting_url(self, value):
+        self.meeting_url = value
 
 class Transcription(Base):
     __tablename__ = "transcriptions"
     id = Column(Integer, primary_key=True, index=True)
-    client_uid = Column(String(255), index=True) # Example length, adjust as needed
-    server_id = Column(String(255)) # Example length, adjust as needed
+    meeting_id = Column(Integer, ForeignKey("meetings.id"), nullable=False, index=True) # Changed nullable to False, should always link
+    # Removed redundant platform, meeting_url, token, client_uid, server_id as they belong to the Meeting
     start_time = Column(Float, nullable=False)
     end_time = Column(Float, nullable=False)
     text = Column(Text, nullable=False)
-    platform = Column(String(100))
-    meeting_url = Column(Text)
-    token = Column(String(255)) # Corresponds to APIToken? Or a different token? Indexed?
-    language = Column(String(10)) # e.g., 'en', 'es'
-    created_at = Column(DateTime, default=datetime.utcnow) # Use default instead of server_default if app handles timestamp
+    speaker = Column(String(255), nullable=True) # Speaker identifier
+    language = Column(String(10), nullable=True) # e.g., 'en', 'es'
+    created_at = Column(DateTime, default=datetime.utcnow)
 
-    # Potential relationships (uncomment and define if needed)
-    # user_id = Column(Integer, ForeignKey("users.id")) # If linked to a user
-    # meeting_id = Column(Integer, ForeignKey("meetings.id")) # If you create a Meeting model
+    meeting = relationship("Meeting", back_populates="transcriptions")
+    
+    # Index for efficient querying by meeting_id and start_time
+    __table_args__ = (Index('ix_transcription_meeting_start', 'meeting_id', 'start_time'),)
 
 # Example of a Meeting model if needed:
 # class Meeting(Base):

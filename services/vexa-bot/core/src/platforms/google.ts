@@ -19,7 +19,7 @@ export async function handleGoogleMeet(botConfig: BotConfig, page: Page): Promis
     // Run both processes concurrently
     const [isAdmitted] = await Promise.all([
       // Wait for admission to the meeting
-      waitForMeetingAdmission(page, leaveButton, botConfig.automaticLeave.waitingRoomTimeout)
+      waitForMeetingAdmission(page, leaveButton, botConfig.automaticLeave?.waitingRoomTimeout ?? 300000)
         .catch(error => {
           log("Meeting admission failed: " + error.message);
           return false;
@@ -35,8 +35,8 @@ export async function handleGoogleMeet(botConfig: BotConfig, page: Page): Promis
     }
 
     log("Successfully admitted to the meeting, starting recording");
-    // Pass platform from botConfig to startRecording
-    await startRecording(page, botConfig.meetingUrl, botConfig.token, botConfig.connectionId, botConfig.platform);
+    // Pass meeting_id to startRecording
+    await startRecording(page, botConfig.meeting_id, botConfig.meetingUrl, botConfig.botName);
   } catch (error: any) {
     console.error(error.message)
     return
@@ -107,18 +107,24 @@ const joinMeeting = async (page: Page, meetingUrl: string, botName: string) => {
   log(`${botName} joined the Meeting.`);
 }
 
-// Modified to have only the actual recording functionality
-const startRecording = async (page: Page, meetingUrl: string, token: string, connectionId: string, platform: string) => {
-  log("Starting actual recording with WebSocket connection");
+// Modified to accept meeting_id and all required WhisperLive parameters
+const startRecording = async (page: Page, meetingId: number, meetingUrl: string, botName: string) => {
+  log(`Starting actual recording with WebSocket connection for meeting ${meetingId}`);
   
-  await page.evaluate(async ({ meetingUrl, token, connectionId, platform }) => {
+  // Pass all required parameters to the evaluated function
+  await page.evaluate(async ({ meetingId, meetingUrl, botName }) => {
+    // Define options directly here or receive them if needed
     const option = {
-      token: token,
-      language: "ru",
-      task: "",
-      modelSize: "medium",
-      useVad: true,
+      language: null, // Set to null to trigger language inference/auto-detection
+      task: "transcribe", // Default or configurable?
+      modelSize: "small", // Default or configurable?
+      useVad: false, // Disable VAD for testing
     }
+
+    let socket: WebSocket | null = null; // Declare socket here
+    let audioContext: AudioContext | null = null; // Declare audioContext here
+    let processor: ScriptProcessorNode | null = null; // Declare processor here
+    let source: MediaStreamAudioSourceNode | null = null; // Declare source here
 
     await new Promise<void>((resolve, reject) => {
       try {
@@ -127,230 +133,234 @@ const startRecording = async (page: Page, meetingUrl: string, token: string, con
           (el: any) => !el.paused
         );
         if (mediaElements.length === 0) {
-          return reject(new Error("[BOT Error] No active media elements found. Ensure the meeting media is playing."));
+          return reject(new Error("[BOT Error] No active media elements found."));
         }
         const element: any = mediaElements[0];
 
         const stream = element.srcObject || element.captureStream();
         if (!(stream instanceof MediaStream)) {
-          return reject(new Error("[BOT Error] Unable to obtain a MediaStream from the media element."));
+          return reject(new Error("[BOT Error] Unable to obtain a MediaStream."));
         }
 
-        // Create a structured identifier using the passed platform
-        const structuredId = `${platform}_${btoa(meetingUrl)}_${connectionId}`;
-
-        // WebSocket connection with retry mechanism
-        const wsUrl = "ws://whisperlive:9090";
-        (window as any).logBot(`Attempting to connect WebSocket to: ${wsUrl} with platform: ${platform}`);
+        // WebSocket connection
+        const wsUrl = (window as any).WHISPER_LIVE_URL || "ws://whisperlive:9090";
+        (window as any).logBot(`Attempting to connect WebSocket to: ${wsUrl} for meeting ${meetingId}`);
         
-        let socket: WebSocket | null = null;
         let isServerReady = false;
         let language = option.language;
         let retryCount = 0;
         const maxRetries = 5;
-        const retryDelay = 2000; // 2 seconds initial delay, will increase exponentially
+        const retryDelay = 2000;
         
-        // Function to create and setup the WebSocket
+        const cleanup = () => {
+            (window as any).logBot("Cleaning up audio processing and WebSocket.");
+            if (processor) processor.disconnect();
+            if (source) source.disconnect();
+            if (audioContext && audioContext.state !== 'closed') audioContext.close();
+            if (socket && socket.readyState === WebSocket.OPEN) socket.close();
+            socket = null;
+            audioContext = null;
+            processor = null;
+            source = null;
+            resolve(); // Resolve the promise
+        };
+        
         const setupWebSocket = () => {
           try {
-            if (socket) {
-              // Close previous socket if it exists
-              try {
-                socket.close();
-              } catch (err) {
-                // Ignore errors when closing
-              }
-            }
+            if (socket) { try { socket.close(); } catch (err) {} }
             
             socket = new WebSocket(wsUrl);
             
             socket.onopen = function() {
               (window as any).logBot("WebSocket connection opened.");
-              retryCount = 0; // Reset retry count on successful connection
+              retryCount = 0;
+              
+              // Create a unique identifier for this connection
+              const uid = `bot-${meetingId}-${Date.now()}`;
               
               if (socket) {
-                socket.send(
+                // Send the initial configuration with ALL required parameters
+                socket?.send(
                   JSON.stringify({
-                    uid: structuredId,
+                    uid: uid, // Required by WhisperLive
+                    platform: "google_meet", // Required by WhisperLive
+                    meeting_url: meetingUrl, // Required by WhisperLive
+                    token: `bot-token-${meetingId}`, // Required by WhisperLive
+                    meeting_id: meetingId,
                     language: option.language,
                     task: option.task,
                     model: option.modelSize,
-                    use_vad: option.useVad,
-                    platform: platform,
-                    meeting_url: meetingUrl,
-                    token: token
+                    use_vad: option.useVad
                   })
                 );
+                
+                (window as any).logBot("Sent configuration to WhisperLive server with all required parameters");
               }
             };
 
             socket.onmessage = (event) => {
               (window as any).logBot("Received message: " + event.data);
               const data = JSON.parse(event.data);
-              if (data["uid"] !== structuredId) return;
+              // **MODIFIED**: Check for meeting_id if server includes it in responses
+              // if (data["meeting_id"] !== meetingId) return; 
 
               if (data["status"] === "WAIT") {
                 (window as any).logBot(`Server busy: ${data["message"]}`);
-                // Optionally stop recording here if required
-              } else if (!isServerReady) {
+              } else if (!isServerReady && data["message"] === "SERVER_READY") {
                 isServerReady = true;
-                (window as any).logBot("Server is ready.");
+                (window as any).logBot("Server is ready. Starting audio processing.");
+                startAudioProcessing(stream);
               } else if (language === null && data["language"]) {
                 (window as any).logBot(`Language detected: ${data["language"]}`);
               } else if (data["message"] === "DISCONNECT") {
                 (window as any).logBot("Server requested disconnect.");
-                if (socket) {
-                  socket.close();
-                }
+                if (socket) { socket.close(); }
               } else {
-                (window as any).logBot(`Transcription: ${JSON.stringify(data)}`);
+                // Enhanced logging for transcription data
+                if (data["text"] && data["text"].trim() !== "") {
+                  (window as any).logBot(`TRANSCRIPT: [${new Date().toISOString()}] Text: "${data["text"]}" Confidence: ${data["confidence"] || "N/A"}`);
+                  
+                  // Additional details if available
+                  if (data["start_time"] && data["end_time"]) {
+                    (window as any).logBot(`TRANSCRIPT_TIMING: Start: ${data["start_time"]}s, End: ${data["end_time"]}s, Duration: ${(data["end_time"] - data["start_time"]).toFixed(2)}s`);
+                  }
+                  
+                  // Log the complete data for debugging
+                  (window as any).logBot(`TRANSCRIPT_FULL_DATA: ${JSON.stringify(data)}`);
+                } else if (data["text"] !== undefined) {
+                  // Log empty transcripts to help with debugging
+                  (window as any).logBot(`TRANSCRIPT_EMPTY: Server returned empty transcription text`);
+                } else {
+                  // Log other messages that aren't SERVER_READY, WAIT, etc.
+                  (window as any).logBot(`UNKNOWN_MESSAGE: ${JSON.stringify(data)}`);
+                }
               }
             };
 
             socket.onerror = (event) => {
               (window as any).logBot(`WebSocket error: ${JSON.stringify(event)}`);
+              // Consider calling cleanup() or attempting reconnect based on error type
             };
 
             socket.onclose = (event) => {
-              (window as any).logBot(
-                `WebSocket connection closed. Code: ${event.code}, Reason: ${event.reason}`
-              );
-              
-              // Retry logic
-              if (retryCount < maxRetries) {
-                const exponentialDelay = retryDelay * Math.pow(2, retryCount);
-                retryCount++;
-                (window as any).logBot(`Attempting to reconnect in ${exponentialDelay}ms. Retry ${retryCount}/${maxRetries}`);
-                
-                setTimeout(() => {
-                  (window as any).logBot(`Retrying WebSocket connection (${retryCount}/${maxRetries})...`);
-                  setupWebSocket();
-                }, exponentialDelay);
-              } else {
-                (window as any).logBot("Maximum WebSocket reconnection attempts reached. Giving up.");
-                // Optionally, we could reject the promise here if required
-              }
+              (window as any).logBot(`WebSocket closed. Code: ${event.code}, Reason: ${event.reason}`);
+              cleanup(); // Clean up resources on close
+              // Remove automatic retry logic here if cleanup handles resolution/rejection
             };
           } catch (e: any) {
-            (window as any).logBot(`Error creating WebSocket: ${e.message}`);
-            // For initial connection errors, handle with retry logic
-            if (retryCount < maxRetries) {
-              const exponentialDelay = retryDelay * Math.pow(2, retryCount);
-              retryCount++;
-              (window as any).logBot(`Attempting to reconnect in ${exponentialDelay}ms. Retry ${retryCount}/${maxRetries}`);
-              
-              setTimeout(() => {
-                (window as any).logBot(`Retrying WebSocket connection (${retryCount}/${maxRetries})...`);
-                setupWebSocket();
-              }, exponentialDelay);
-            } else {
-              return reject(new Error(`WebSocket creation failed after ${maxRetries} attempts: ${e.message}`));
-            }
+            (window as any).logBot(`Error setting up WebSocket: ${e.message}`);
+             cleanup(); // Clean up on initial setup error
+             reject(new Error(`WebSocket setup failed: ${e.message}`)); // Reject the main promise
           }
         };
-        
-        // Initial WebSocket setup
+
+        const startAudioProcessing = (mediaStream: MediaStream) => {
+             try {
+                  if (audioContext && audioContext.state !== 'closed') {
+                       (window as any).logBot("Audio context already exists or is closing.");
+                       return;
+                  }
+                  audioContext = new AudioContext();
+                  source = audioContext.createMediaStreamSource(mediaStream);
+                  processor = audioContext.createScriptProcessor(4096, 1, 1);
+
+                  // The expected sample rate for WhisperLive
+                  const TARGET_SAMPLE_RATE = 16000;
+                  const currentSampleRate = audioContext.sampleRate;
+                  (window as any).logBot(`Current audio context sample rate: ${currentSampleRate}Hz, target rate: ${TARGET_SAMPLE_RATE}Hz`);
+
+                  processor.onaudioprocess = (e) => {
+                      if (!socket || socket.readyState !== WebSocket.OPEN || !isServerReady || !audioContext) return;
+                      const inputData = e.inputBuffer.getChannelData(0);
+                      
+                      // --- DEBUG: Log raw audio amplitude ---
+                      let maxAbsValue = 0;
+                      let sumAbsValue = 0;
+                      for (let i = 0; i < inputData.length; i++) {
+                          const absValue = Math.abs(inputData[i]);
+                          if (absValue > maxAbsValue) {
+                              maxAbsValue = absValue;
+                          }
+                          sumAbsValue += absValue;
+                      }
+                      const avgAbsValue = sumAbsValue / inputData.length;
+                      (window as any).logBot(`RAW_AUDIO_CHUNK: Length=${inputData.length}, AvgAbs=${avgAbsValue.toFixed(4)}, MaxAbs=${maxAbsValue.toFixed(4)}`);
+                      // --- END DEBUG ---
+                      
+                      try {
+                          if (socket && socket.readyState === WebSocket.OPEN) {
+                              // Step 1: Create a copy of the input data
+                              const data = new Float32Array(inputData);
+                              
+                              // Step 2: Perform resampling to 16kHz if needed
+                              let audioToSend;
+                              
+                              if (currentSampleRate !== TARGET_SAMPLE_RATE) {
+                                  // Calculate target length based on the ratio of sample rates
+                                  const targetLength = Math.round(data.length * (TARGET_SAMPLE_RATE / currentSampleRate));
+                                  const resampledData = new Float32Array(targetLength);
+                                  
+                                  // Linear interpolation resampling
+                                  const springFactor = (data.length - 1) / (targetLength - 1);
+                                  resampledData[0] = data[0]; // First sample stays the same
+                                  resampledData[targetLength - 1] = data[data.length - 1]; // Last sample stays the same
+                                  
+                                  // Interpolate all samples in between
+                                  for (let i = 1; i < targetLength - 1; i++) {
+                                      const index = i * springFactor;
+                                      const leftIndex = Math.floor(index);
+                                      const rightIndex = Math.ceil(index);
+                                      const fraction = index - leftIndex;
+                                      resampledData[i] = data[leftIndex] + (data[rightIndex] - data[leftIndex]) * fraction;
+                                  }
+                                  
+                                  audioToSend = resampledData;
+                                  (window as any).logBot(`Resampled audio: ${data.length} samples at ${currentSampleRate}Hz → ${resampledData.length} samples at ${TARGET_SAMPLE_RATE}Hz`);
+                              } else {
+                                  audioToSend = data;
+                                  (window as any).logBot(`Audio already at target rate: ${TARGET_SAMPLE_RATE}Hz`);
+                              }
+
+                              // Step 3: Convert Float32Array to Int16Array as expected by WhisperLive
+                              const int16Data = new Int16Array(audioToSend.length);
+                              for (let i = 0; i < audioToSend.length; i++) {
+                                  // Ensure values are in the valid range [-1, 1] then scale to Int16 range
+                                  const sample = Math.max(-1, Math.min(1, audioToSend[i]));
+                                  int16Data[i] = sample < 0 ? sample * 32768 : sample * 32767;
+                              }
+
+                              // Step 4: Send the processed audio data
+                              socket.send(int16Data.buffer);
+                          } else {
+                              (window as any).logBot("WebSocket not ready or closed, skipping audio send.");
+                          }
+                      } catch (error) {
+                          (window as any).logBot(`Error sending audio data: ${error}`);
+                      }
+                  };
+
+                  source.connect(processor);
+                  processor.connect(audioContext.destination); // Connect to destination to start processing
+             } catch (audioError: any) {
+                  (window as any).logBot(`Error starting audio processing: ${audioError.message}`);
+                  cleanup(); // Cleanup if audio setup fails
+                  reject(audioError); // Reject the main promise
+             }
+        };
+
+        // Initial WebSocket setup call
         setupWebSocket();
 
-        const audioDataCache = [];
-        const context = new AudioContext();
-        const mediaStream = context.createMediaStreamSource(stream);
-        const recorder = context.createScriptProcessor(4096, 1, 1);
-
-        recorder.onaudioprocess = async (event) => {
-          // Skip processing if any required component is missing or WebSocket is not open
-          if (!context || !isServerReady) return;
-          if (!socket) return;
-          if (socket.readyState !== WebSocket.OPEN) return;
-
-          const inputData = event.inputBuffer.getChannelData(0);
-
-          const data = new Float32Array(inputData);
-          const targetLength = Math.round(data.length * (16000 / context.sampleRate));
-          const resampledData = new Float32Array(targetLength);
-          const springFactor = (data.length - 1) / (targetLength - 1);
-          resampledData[0] = data[0];
-          resampledData[targetLength - 1] = data[data.length - 1];
-          for (let i = 1; i < targetLength - 1; i++) {
-            const index = i * springFactor;
-            const leftIndex = Math.floor(index);
-            const rightIndex = Math.ceil(index);
-            const fraction = index - leftIndex;
-            resampledData[i] = data[leftIndex] + (data[rightIndex] - data[leftIndex]) * fraction;
-          } 
-          audioDataCache.push(inputData);
-          
-          // Final safety check before sending
-          if (socket && socket.readyState === WebSocket.OPEN) {
-            socket.send(resampledData);
-          }
-        };
-
-        mediaStream.connect(recorder);
-        recorder.connect(context.destination);
-        mediaStream.connect(context.destination);
-        
-        // Click the "People" button
-        const peopleButton = document.querySelector('button[aria-label^="People"]');
-        if (!peopleButton) {
-          recorder.disconnect();
-          return reject(new Error("[BOT Inner Error] 'People' button not found. Update the selector."));
-        }
-        (peopleButton as HTMLElement).click();
-
-        // Monitor participant list every 5 seconds
-        let aloneTime = 0;
-        const checkInterval = setInterval(() => {
-          const peopleList = document.querySelector('[role="list"]');
-          if (!peopleList) {
-            (window as any).logBot("Participant list not found; assuming meeting ended.");
-            clearInterval(checkInterval);
-            recorder.disconnect()
-            resolve()
-            return;
-          }
-          const count = peopleList.childElementCount;
-          (window as any).logBot("Participant count: " + count);
-
-          if (count <= 1) {
-            aloneTime += 5;
-            (window as any).logBot("Bot appears alone for " + aloneTime + " seconds...");
-          } else {
-            aloneTime = 0;
-          }
-
-          if (aloneTime >= 10 || count === 0) {
-            (window as any).logBot("Meeting ended or bot alone for too long. Stopping recorder...");
-            clearInterval(checkInterval);
-            recorder.disconnect();
-            resolve()
-          }
-        }, 5000);
-
-        // Listen for unload and visibility changes
-        window.addEventListener("beforeunload", () => {
-          (window as any).logBot("Page is unloading. Stopping recorder...");
-          clearInterval(checkInterval);
-          recorder.disconnect();
-          resolve()
-        });
-        document.addEventListener("visibilitychange", () => {
-          if (document.visibilityState === "hidden") {
-            (window as any).logBot("Document is hidden. Stopping recorder...");
-            clearInterval(checkInterval);
-            recorder.disconnect();
-            resolve()
-          }
-        });
-      } catch (error: any) {
-        return reject(new Error("[BOT Error] " + error.message));
+      } catch (e: any) {
+        (window as any).logBot(`Error in evaluated function scope: ${e.message}`);
+        reject(e);
       }
     });
-  }, { meetingUrl, token, connectionId, platform });
+
+  }, { meetingId, meetingUrl, botName }); // Pass meetingId, meetingUrl, and botName to the evaluation context
 };
 
-// Keep the original recordMeeting for backward compatibility
-const recordMeeting = async (page: Page, meetingUrl: string, token: string, connectionId: string, platform: string) => {
-  await prepareForRecording(page);
-  await startRecording(page, meetingUrl, token, connectionId, platform);
-};
+// Remove recordMeeting function if redundant
+// const recordMeeting = async (page: Page, meetingUrl: string, token: string, connectionId: string, platform: string) => {
+//   ...
+// };

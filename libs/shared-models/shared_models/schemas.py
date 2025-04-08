@@ -1,6 +1,95 @@
-from typing import List, Optional
-from pydantic import BaseModel, Field, EmailStr
+from typing import List, Optional, Dict, Tuple
+from pydantic import BaseModel, Field, EmailStr, validator
 from datetime import datetime
+from enum import Enum, auto
+import re # Import re for native ID validation
+
+# --- Platform Definitions ---
+
+class Platform(str, Enum):
+    """
+    Platform identifiers for meeting platforms.
+    The value is the external API name, while the bot_name is what's used internally by the bot.
+    """
+    GOOGLE_MEET = "google_meet"
+    ZOOM = "zoom"
+    TEAMS = "teams"
+    
+    @property
+    def bot_name(self) -> str:
+        """
+        Returns the platform name used by the bot containers.
+        This maps external API platform names to internal bot platform names.
+        """
+        mapping = {
+            Platform.GOOGLE_MEET: "google",
+            Platform.ZOOM: "zoom",
+            Platform.TEAMS: "teams"
+        }
+        return mapping[self]
+    
+    @classmethod
+    def get_bot_name(cls, platform_str: str) -> str:
+        """
+        Static method to get the bot platform name from a string.
+        This is useful when you have a platform string but not a Platform instance.
+        
+        Args:
+            platform_str: The platform identifier string (e.g., 'google_meet')
+            
+        Returns:
+            The platform name used by the bot (e.g., 'google')
+        """
+        try:
+            platform = Platform(platform_str)
+            return platform.bot_name
+        except ValueError:
+            # If the platform string is invalid, return it unchanged or handle error
+            return platform_str # Or raise error/log warning
+
+    @classmethod
+    def construct_meeting_url(cls, platform_str: str, native_id: str) -> Optional[str]:
+        """
+        Constructs the full meeting URL from platform and native ID.
+        Returns None if the platform is unknown or ID is invalid for the platform.
+        """
+        try:
+            platform = Platform(platform_str)
+            if platform == Platform.GOOGLE_MEET:
+                # Basic validation for Google Meet code format (xxx-xxxx-xxx)
+                if re.fullmatch(r"^[a-z]{3}-[a-z]{4}-[a-z]{3}$", native_id):
+                     return f"https://meet.google.com/{native_id}"
+                else:
+                     return None # Invalid ID format
+            elif platform == Platform.ZOOM:
+                # Basic validation for Zoom meeting ID (numeric) and optional password
+                # Example: "1234567890" or "1234567890?pwd=xyz"
+                match = re.fullmatch(r"^(\d{9,11})(?:\?pwd=(.+))?$", native_id)
+                if match:
+                    zoom_id = match.group(1)
+                    pwd = match.group(2)
+                    url = f"https://*.zoom.us/j/{zoom_id}" # Domain might vary, use wildcard? Or require specific domain?
+                    if pwd:
+                        url += f"?pwd={pwd}"
+                    return url
+                else:
+                    return None # Invalid ID format
+            elif platform == Platform.TEAMS:
+                # Teams URLs are complex and often require context - this is a placeholder
+                # Might need more specific parsing or different approach for Teams
+                # Assuming native_id might be part of a longer URL or require tenant info.
+                # This is a very basic guess and likely needs refinement.
+                 if native_id: # Placeholder validation
+                    # Cannot reliably construct full Teams URL from just an ID usually
+                     # Let's return None indicating we can't construct it reliably here
+                     # The bot might handle this differently based on the native_id
+                     return None # Cannot reliably construct
+                 else:
+                     return None
+            else:
+                return None # Unknown platform
+        except ValueError:
+            return None # Invalid platform string
 
 # --- Schemas from Admin API --- 
 
@@ -10,23 +99,23 @@ class UserBase(BaseModel): # Base for common user fields
     image_url: Optional[str] = None
 
 class UserCreate(UserBase):
-    pass # Inherits all fields from UserBase
+    pass
 
 class UserResponse(UserBase):
     id: int
-    created_at: datetime # Keep as datetime for internal use
+    created_at: datetime
 
     class Config:
-        orm_mode = True # Compatibility with SQLAlchemy models
+        orm_mode = True
 
 class TokenBase(BaseModel):
     user_id: int
 
-class TokenCreate(TokenBase): # Not strictly needed if token generated internally
+class TokenCreate(TokenBase):
     pass
 
 class TokenResponse(TokenBase):
-    id: int # Assuming APIToken model has an ID
+    id: int
     token: str
     created_at: datetime
 
@@ -36,58 +125,104 @@ class TokenResponse(TokenBase):
 class UserDetailResponse(UserResponse):
     tokens: List[TokenResponse] = []
 
-# --- Schemas from Transcription Collector --- 
+# --- Meeting Schemas --- 
 
-class SegmentBase(BaseModel):
-    start_time: float
-    end_time: float
-    text: str
+class MeetingBase(BaseModel):
+    platform: Platform = Field(..., description="Platform identifier (e.g., 'google_meet', 'zoom')")
+    native_meeting_id: str = Field(..., description="The native meeting identifier (e.g., 'abc-defg-hij' for Google Meet, '1234567890?pwd=xyz' for Zoom)")
+    # meeting_url field removed
 
-class TranscriptionSegment(SegmentBase):
-    client_uid: str
-    timestamp: Optional[datetime] = None
+    @validator('platform', pre=True) # pre=True allows validating string before enum conversion
+    def validate_platform_str(cls, v):
+        """Validate that the platform string is one of the supported platforms"""
+        try:
+            Platform(v)
+            return v
+        except ValueError:
+            supported = ', '.join([p.value for p in Platform])
+            raise ValueError(f"Invalid platform '{v}'. Must be one of: {supported}")
 
-class TranscriptionCreate(SegmentBase):
-    client_uid: str
-    server_id: str
-    platform: Optional[str] = None
-    meeting_url: Optional[str] = None
-    token: Optional[str] = None # API Token or other?
-    language: Optional[str] = None
+    # Removed get_bot_platform method, use Platform.get_bot_name(self.platform.value) if needed
 
-class TranscriptionDB(TranscriptionCreate):
-    id: int
+class MeetingCreate(MeetingBase):
+    # user_id is derived from the API token, not sent in request
+    bot_name: Optional[str] = Field(None, description="Optional name for the bot in the meeting")
+
+class MeetingResponse(BaseModel): # Not inheriting from MeetingBase anymore to avoid duplicate fields if DB model is used directly
+    id: int = Field(..., description="Internal database ID for the meeting")
+    user_id: int
+    platform: Platform # Use the enum type
+    native_meeting_id: Optional[str] = Field(None, description="The native meeting identifier provided during creation") # Renamed from platform_specific_id for clarity
+    constructed_meeting_url: Optional[str] = Field(None, description="The meeting URL constructed internally, if possible") # Added for info
+    status: str
+    bot_container_id: Optional[str]
+    start_time: Optional[datetime]
+    end_time: Optional[datetime]
     created_at: datetime
+    updated_at: datetime
 
     class Config:
         orm_mode = True
+        use_enum_values = True # Serialize Platform enum to its string value
 
-class TranscriptionResponse(BaseModel):
-    id: int
-    client_uid: str
-    start_time: float
-    end_time: float
+# --- Transcription Schemas --- 
+
+class TranscriptionSegment(BaseModel):
+    # id: Optional[int] # No longer relevant to expose outside DB
+    start_time: float = Field(..., alias='start') # Add alias
+    end_time: float = Field(..., alias='end')     # Add alias
     text: str
-    platform: Optional[str] = None
-    meeting_url: Optional[str] = None
-    token: Optional[str] = None
-    created_at: datetime # Keep as datetime
+    language: Optional[str]
+    # created_at: Optional[datetime] # Not usually needed in response lists
+    speaker: Optional[str] = None
 
     class Config:
         orm_mode = True
+        allow_population_by_field_name = True # Allow using both alias and field name
 
-class TranscriptsResponse(BaseModel):
-    total: int
-    transcripts: List[TranscriptionResponse]
+class TranscriptionRequest(BaseModel):
+    """Data structure for storing transcription data from external sources."""
+    client_uid: Optional[str] = None # Make optional
+    platform: Platform # Use enum
+    native_meeting_id: str # Changed from meeting_url
+    token: str
+    # Allow 'segments' as an alias for 'transcription'
+    transcription: List[TranscriptionSegment] = Field(..., alias='segments')
 
-class FullTranscript(BaseModel):
-    client_uid: Optional[str] = None
-    platform: Optional[str] = None
-    meeting_url: Optional[str] = None
-    token: Optional[str] = None
-    sessions: Optional[List[str]] = None
-    segments: List[TranscriptionSegment]
-    full_text: str
+    @validator('platform', pre=True)
+    def validate_transcription_platform_str(cls, v):
+        """Validate that the platform string is one of the supported platforms"""
+        try:
+            Platform(v)
+            return v
+        except ValueError:
+            supported = ', '.join([p.value for p in Platform])
+            raise ValueError(f"Invalid platform '{v}'. Must be one of: {supported}")
+
+class TranscriptionData(BaseModel):
+    """Data structure expected from WhisperLive client."""
+    meeting_id: Optional[int] = None # Make optional
+    segments: List[TranscriptionSegment] # Expecting new structure
+    # Removed platform, meeting_url, token - should be linked via meeting_id
+
+class TranscriptionResponse(BaseModel): # Doesn't inherit MeetingResponse to avoid redundancy if joining data
+    """Response for getting a meeting's transcript."""
+    # Meeting details (consider duplicating fields from MeetingResponse or nesting)
+    id: int = Field(..., description="Internal database ID for the meeting")
+    platform: Platform
+    native_meeting_id: Optional[str]
+    constructed_meeting_url: Optional[str]
+    status: str
+    start_time: Optional[datetime]
+    end_time: Optional[datetime]
+    # ---
+    segments: List[TranscriptionSegment] = Field(..., description="List of transcript segments")
+
+    class Config:
+        orm_mode = True # Allows creation from ORM models (e.g., joined query result)
+        use_enum_values = True
+
+# --- Utility Schemas --- 
 
 class HealthResponse(BaseModel):
     status: str
@@ -96,11 +231,7 @@ class HealthResponse(BaseModel):
     timestamp: datetime
 
 class ErrorResponse(BaseModel):
-    error: str
-
-class Meeting(BaseModel):
-    platform: str
-    meeting_url: str
+    detail: str # Standard FastAPI error response uses 'detail'
 
 class MeetingListResponse(BaseModel):
-    meetings: List[Meeting] 
+    meetings: List[MeetingResponse] 

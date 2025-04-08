@@ -1,18 +1,20 @@
 import { runBot } from "."
 import { z } from 'zod';
+import { BotConfig } from './types'; // Import the type for better clarity
 
-// Define a schema that matches your JSON configuration
+// Define a Zod schema that matches your BotConfig type
 export const BotConfigSchema = z.object({
+  meeting_id: z.number().int(), // Add meeting_id validation
   platform: z.enum(["google", "zoom", "teams"]),
   meetingUrl: z.string().url(),
   botName: z.string(),
-  token: z.string(),
-  connectionId: z.string(),
+  // token: z.string(), // Remove if not needed by bot
+  // connectionId: z.string(), // Remove if not needed by bot
   automaticLeave: z.object({
-    waitingRoomTimeout: z.number().int(),
-    noOneJoinedTimeout: z.number().int(),
-    everyoneLeftTimeout: z.number().int()
-  })
+    waitingRoomTimeout: z.number().int().optional(), // Make optional
+    noOneJoinedTimeout: z.number().int().optional(), // Make optional
+    everyoneLeftTimeout: z.number().int().optional() // Make optional
+  }).optional() // Make the whole object optional
 });
 
 
@@ -27,7 +29,7 @@ if (!rawConfig) {
   // Parse the JSON string from the environment variable
   const parsedConfig = JSON.parse(rawConfig);
   // Validate and parse the config using zod
-  const botConfig = BotConfigSchema.parse(parsedConfig);
+  const botConfig: BotConfig = BotConfigSchema.parse(parsedConfig);
 
   // Run the bot with the validated configuration
   runBot(botConfig).catch((error) => {

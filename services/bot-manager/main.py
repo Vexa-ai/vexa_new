@@ -6,7 +6,7 @@ import logging
 import os
 import base64
 from typing import Optional
-from redis import asyncio as aioredis
+import redis.asyncio as aioredis
 
 # Local imports - Remove unused ones
 # from app.database.models import init_db # Using local init_db now
@@ -14,16 +14,15 @@ from redis import asyncio as aioredis
 # from app.tasks.monitoring import celery_app # Not used here
 
 from config import BOT_IMAGE_NAME, REDIS_URL
-from redis_utils import (
-    generate_meeting_id, acquire_lock, release_lock,
-    store_container_mapping, get_container_id_for_meeting,
-    init_redis, close_redis, extract_platform_specific_id
-)
 from docker_utils import get_socket_session, close_docker_client, start_bot_container, stop_bot_container
-from shared_models.database import init_db # New import (get_db not used directly here)
+from shared_models.database import init_db, get_db
+from shared_models.models import User, Meeting # Import Meeting model
+from shared_models.schemas import MeetingCreate, MeetingResponse, Platform # Import new schemas and Platform
 from auth import get_current_user # Import auth dependency
 from sqlalchemy.ext.asyncio import AsyncSession
-from shared_models.models import User # New import
+from sqlalchemy.future import select
+from sqlalchemy import and_
+from datetime import datetime # For start_time
 
 # Configure logging
 logging.basicConfig(
@@ -44,212 +43,233 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Pydantic models for request validation
-class BotRequest(BaseModel):
-    platform: str = Field(..., description="Platform identifier (e.g., 'google_meet', 'zoom')")
-    meeting_url: str = Field(..., description="The full meeting URL for the bot to join")
-    token: str = Field(..., description="The unique token identifying the customer/request context")
-    bot_name: Optional[str] = Field(None, description="Optional name for the bot in the meeting")
-
-class BotResponse(BaseModel):
-    status: str
-    message: str
-    meeting_id: Optional[str] = None # Now uses the platform:platform_id:token format
-    container_id: Optional[str] = None
+# Pydantic models - Use schemas from shared_models
+# class BotRequest(BaseModel): ... -> Replaced by MeetingCreate
+# class BotResponse(BaseModel): ... -> Replaced by MeetingResponse
 
 @app.on_event("startup")
 async def startup_event():
     logger.info("Starting up Bot Manager...")
-    await init_db() 
-    await init_redis()
-    get_socket_session()
-    logger.info("Database, Redis and Socket Session initialized.")
+    await init_db()
+    # await init_redis() # Removed redis init if not used elsewhere
+    try:
+        get_socket_session()
+    except Exception as e:
+        logger.error(f"Failed to initialize Docker client on startup: {e}", exc_info=True)
+    logger.info("Database and Docker Client initialized (attempted).")
 
 @app.on_event("shutdown")
 async def shutdown_event():
     logger.info("Shutting down Bot Manager...")
-    await close_redis()
-    close_docker_client() 
-    logger.info("Redis and Socket Session closed.")
+    # await close_redis() # Removed redis close if not used
+    close_docker_client()
+    logger.info("Docker Client closed.")
 
-@app.get("/", include_in_schema=False) # Hide root from docs for now
+@app.get("/", include_in_schema=False)
 async def root():
-    # Keep simple root for basic health/status check if needed
     return {"message": "Vexa Bot Manager is running"}
 
-@app.post("/bots", 
-          response_model=BotResponse,
+@app.post("/bots",
+          response_model=MeetingResponse,
           status_code=status.HTTP_201_CREATED,
           summary="Request a new bot instance to join a meeting",
-          dependencies=[Depends(get_current_user)]) # Apply authentication
-async def request_bot(req: BotRequest, current_user: User = Depends(get_current_user)):
+          dependencies=[Depends(get_current_user)])
+async def request_bot(
+    req: MeetingCreate,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db)
+):
     """Handles requests to launch a new bot container for a meeting.
     Requires a valid API token associated with a user.
-    - Generates a unique meeting ID.
-    - Attempts to acquire a lock in Redis for this meeting ID.
-    - If lock acquired, starts a Docker container for the bot.
-    - Stores mapping between meeting ID and container ID.
-    - Returns container ID and status.
-    - If lock not acquired, indicates that a bot is already running.
+    - Constructs the meeting URL from platform and native ID.
+    - Creates a Meeting record in the database.
+    - Starts a Docker container for the bot, passing the internal meeting ID and constructed URL.
+    - Updates the Meeting record with container details and status.
+    - Returns the created Meeting details.
     """
-    logger.info(f"Received bot request for platform '{req.platform}' from user {current_user.id}")
+    logger.info(f"Received bot request for platform '{req.platform.value}' with native ID '{req.native_meeting_id}' from user {current_user.id}")
 
-    # 1. Extract platform-specific ID from URL
-    platform_specific_id = extract_platform_specific_id(req.platform, req.meeting_url)
-    if not platform_specific_id:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Could not extract a valid meeting identifier from the URL '{req.meeting_url}' for platform '{req.platform}'."
-        )
+    # 1. Construct meeting URL
+    constructed_url = Platform.construct_meeting_url(req.platform.value, req.native_meeting_id)
+    if not constructed_url:
+        # Handle cases where URL construction isn't possible (e.g., Teams, invalid ID format)
+        # Depending on policy, either reject or proceed without a URL for the bot if it can handle it
+        logger.warning(f"Could not construct meeting URL for platform {req.platform.value} and ID {req.native_meeting_id}. Proceeding without URL for bot.")
+        # Or raise HTTPException: 
+        # raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Could not construct URL for platform {req.platform.value} with ID {req.native_meeting_id}. Invalid ID or unsupported construction.")
 
-    # 2. Generate the standardized meeting ID
-    try:
-        meeting_id = generate_meeting_id(req.platform, platform_specific_id, req.token)
-        logger.info(f"Generated meeting_id: {meeting_id}")
-    except ValueError as e:
-         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+    # 2. Check for existing active meeting for this user/platform/native_id
+    existing_meeting_stmt = select(Meeting).where(
+        Meeting.user_id == current_user.id,
+        Meeting.platform == req.platform.value,
+        Meeting.platform_specific_id == req.native_meeting_id,
+        Meeting.status.in_(['requested', 'active'])
+    )
+    result = await db.execute(existing_meeting_stmt)
+    existing_meeting = result.scalars().first()
 
-    # 3. Try to acquire the lock
-    if not await acquire_lock(meeting_id):
-        # Could check TTL here if needed, but acquire_lock logs it.
+    if existing_meeting:
+        logger.warning(f"User {current_user.id} requested duplicate bot for active/requested meeting {existing_meeting.id} ({req.platform.value} / {req.native_meeting_id})")
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
-            detail={"status": "conflict", "message": f"A bot is already active or starting for meeting ID {meeting_id}.", "meeting_id": meeting_id}
+            detail=f"An active or requested meeting already exists for this platform and meeting ID. Meeting ID: {existing_meeting.id}"
         )
 
-    # 4. Start the bot container (passing full URL and specific BOT_IMAGE_NAME)
+    # 3. Create Meeting record in DB
+    new_meeting = Meeting(
+        user_id=current_user.id,
+        platform=req.platform.value, # Store the string value
+        platform_specific_id=req.native_meeting_id, # Use platform_specific_id instead of native_meeting_id
+        meeting_url=constructed_url, # Use meeting_url instead of constructed_meeting_url
+        status='requested'
+    )
+    db.add(new_meeting)
+    await db.commit()
+    await db.refresh(new_meeting)
+    meeting_id = new_meeting.id # Use internal ID from now on
+    logger.info(f"Created meeting record with ID: {meeting_id}")
+
+    # 4. Start the bot container
+    container_id = None
     try:
+        logger.info(f"Attempting to start bot container for meeting {meeting_id}...") # Log before start
+        # Pass the *constructed* URL to the bot container
         container_id = start_bot_container(
-            meeting_url=req.meeting_url, 
-            platform=req.platform,
-            token=req.token,
+            meeting_id=meeting_id, # Internal DB ID
+            meeting_url=constructed_url, # Pass the constructed URL (can be None)
+            platform=req.platform.value, # Pass platform string value
             bot_name=req.bot_name,
         )
-        
+        logger.info(f"Call to start_bot_container completed. Container ID: {container_id}") # Log after start
+
         if not container_id:
-            # If starting failed, release the lock
-            await release_lock(meeting_id)
+            logger.error(f"Failed to start bot container for meeting {meeting_id} (start_bot_container returned None)")
+            # Update status immediately if start failed
+            new_meeting.status = 'error'
+            await db.commit()
+            # Use await db.refresh(new_meeting) if needed, but commit might be enough
             raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, 
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail={"status": "error", "message": "Failed to start bot container.", "meeting_id": meeting_id}
             )
 
-        # 5. Store the mapping if container started successfully
-        await store_container_mapping(meeting_id, container_id)
+        # 5. Update Meeting record with container details and status
+        logger.info(f"Attempting to update meeting {meeting_id} status to active with container ID {container_id}...") # Log before update
+        new_meeting.bot_container_id = container_id
+        new_meeting.status = 'active'
+        new_meeting.start_time = datetime.utcnow()
+        await db.commit()
+        await db.refresh(new_meeting)
+        logger.info(f"Successfully updated meeting {meeting_id} status.") # Log after update
 
-        logger.info(f"Successfully started bot container {container_id} for meeting_id {meeting_id}")
-        return BotResponse(
-            status="started",
-            message="Bot container started successfully.",
-            meeting_id=meeting_id,
-            container_id=container_id
-        )
+        logger.info(f"Successfully started bot container {container_id} for meeting {meeting_id}")
+        return MeetingResponse.from_orm(new_meeting)
 
     except Exception as e:
-        # Generic error handling: Release lock and report
-        logger.error(f"Error during bot startup process for meeting_id {meeting_id}: {e}", exc_info=True)
-        await release_lock(meeting_id) # Ensure lock is released on failure
+        # Enhanced logging in the exception handler
+        logger.error(f"Exception occurred during bot startup process for meeting {meeting_id} (after DB creation): {e}", exc_info=True)
+        # Attempt to update status to error even if container start failed or subsequent update failed
+        try:
+            # Fetch again in case session state is lost or object is detached
+            meeting_to_update = await db.get(Meeting, meeting_id)
+            if meeting_to_update and meeting_to_update.status != 'error': # Avoid redundant updates
+                 logger.warning(f"Updating meeting {meeting_id} status to 'error' due to exception.")
+                 meeting_to_update.status = 'error'
+                 # Assign container ID even if update failed later, helps debugging
+                 if container_id:
+                     meeting_to_update.bot_container_id = container_id
+                 await db.commit()
+            elif not meeting_to_update:
+                logger.error(f"Could not find meeting {meeting_id} to update status to error.")
+        except Exception as db_err:
+             logger.error(f"Failed to update meeting {meeting_id} status to error after bot startup exception: {db_err}")
+
+        # Re-raise HTTPException to send appropriate response to client
         raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, 
-            detail={"status": "error", "message": f"An unexpected error occurred: {str(e)}", "meeting_id": meeting_id}
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={"status": "error", "message": f"An unexpected error occurred during bot startup: {str(e)}", "meeting_id": meeting_id}
         )
 
-@app.delete("/bots/{platform}/{platform_specific_id}/{token}",
+@app.delete("/bots/{platform}/{native_meeting_id}",
              status_code=status.HTTP_200_OK,
-             response_model=BotResponse,
-             summary="Stop a running bot for a specific meeting")
-async def stop_bot(platform: str, platform_specific_id: str, token: str, 
-                   current_user: User = Depends(get_current_user)): # Protect endpoint
-    """Stops the bot container associated with the meeting ID and releases the lock."""
-    try:
-        # 1. Generate the meeting ID from path parameters
-        meeting_id = generate_meeting_id(platform, platform_specific_id, token)
-        logger.info(f"User {current_user.id} requested to stop bot for meeting_id: {meeting_id}")
+             response_model=MeetingResponse,
+             summary="Stop a running bot for a specific meeting using platform and native ID",
+             dependencies=[Depends(get_current_user)])
+async def stop_bot(
+    platform: Platform,
+    native_meeting_id: str,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db)
+):
+    """Stops the bot container associated with the platform and native meeting ID, verifying ownership."""
+    logger.info(f"User {current_user.id} requested to stop bot for platform '{platform.value}' with native ID: '{native_meeting_id}'")
 
-        # 2. Find the container ID from Redis mapping
-        container_id = await get_container_id_for_meeting(meeting_id)
-        
-        stop_success = True # Assume success unless stop fails or no container found
-        response_message = f"Stop request processed for meeting ID {meeting_id}."
-        response_status = "stopped"
+    # 1. Find the *latest* active or requested meeting matching criteria for the user
+    # (Handling potential past meetings with the same ID)
+    stmt = select(Meeting).where(
+        Meeting.user_id == current_user.id,
+        Meeting.platform == platform.value,
+        Meeting.platform_specific_id == native_meeting_id,
+        Meeting.status.in_(['requested', 'active'])
+    ).order_by(Meeting.created_at.desc())
 
-        if not container_id:
-            logger.warning(f"No active bot container mapping found for meeting_id: {meeting_id}. Releasing lock only.")
-            response_message = f"No active bot mapping found for meeting ID {meeting_id}, lock released."
-            response_status = "not_found" # Indicate mapping wasn't found
-            stop_success = False # Technically didn't stop anything
+    result = await db.execute(stmt)
+    meeting = result.scalars().first()
+
+    if not meeting:
+        # Check if a meeting exists but is already stopped/error
+        stmt_inactive = select(Meeting).where(
+            Meeting.user_id == current_user.id,
+            Meeting.platform == platform.value,
+            Meeting.platform_specific_id == native_meeting_id
+        ).order_by(Meeting.created_at.desc())
+        result_inactive = await db.execute(stmt_inactive)
+        inactive_meeting = result_inactive.scalars().first()
+        if inactive_meeting:
+            logger.warning(f"Attempt to stop meeting for {platform.value}/{native_meeting_id} which is already in status '{inactive_meeting.status}' (Meeting ID: {inactive_meeting.id})")
+            return MeetingResponse.from_orm(inactive_meeting) # Return current state
         else:
-            # 3. Stop the container if found
-            logger.info(f"Attempting to stop container {container_id} for meeting_id: {meeting_id}")
-            stopped = stop_bot_container(container_id)
-            
-            if not stopped:
-                # Log error but proceed to release lock anyway
-                logger.error(f"Stop command failed or container {container_id} not found by Docker. Proceeding to release lock.")
-                # Even if stop fails, we proceed with lock release. Maybe container is already gone.
-                response_message = f"Stop command failed for container {container_id} (it might be already stopped/gone). Lock released."
-                response_status = "stop_failed"
-                stop_success = False
-            else:
-                 response_message = f"Stop command successfully sent to container {container_id}. Lock released."
-                 response_status = "stopped"
+            logger.warning(f"No active or inactive meeting found for user {current_user.id}, platform '{platform.value}', native ID '{native_meeting_id}'")
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"No active meeting found for platform {platform.value} and meeting ID {native_meeting_id}.")
 
-        # 4. Release the lock and mapping from Redis (always attempt this)
-        await release_lock(meeting_id)
-        
-        return BotResponse(
-            status=response_status,
-            message=response_message,
-            meeting_id=meeting_id,
-            container_id=container_id # Return the ID even if stop failed, for reference
-        )
+    # Found an active/requested meeting - meeting.id is the internal ID
+    internal_meeting_id = meeting.id
+    logger.info(f"Found active meeting {internal_meeting_id} matching {platform.value}/{native_meeting_id} for user {current_user.id}")
 
-    except ValueError as e: # Catch specific error from generate_meeting_id
-         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Invalid components for meeting_id: {str(e)}")
-    except Exception as e:
-        logger.error(f"Error stopping bot for {platform}/{platform_specific_id}/{token}: {e}", exc_info=True)
-        # Try to generate meeting_id for the error response if possible
-        try: 
-            m_id = generate_meeting_id(platform, platform_specific_id, token)
-        except: 
-            m_id = f"{platform}:{platform_specific_id}:{token}" # Fallback
-        raise HTTPException(status_code=500, detail={"status": "error", "message": str(e), "meeting_id": m_id})
+    # Ownership is implicitly verified by the initial query including user_id
 
-# --- Remove Temporary Debug Endpoint --- 
-# @app.delete("/debug/locks/{platform}/{meeting_url_b64}/{token}", ...)
-# async def debug_release_lock(...):
-#    ...
+    # 2. Attempt to stop the container
+    container_id = meeting.bot_container_id
+    stop_success = False
+    if container_id:
+        logger.info(f"Attempting to stop container {container_id} for meeting {internal_meeting_id}")
+        stopped = stop_bot_container(container_id)
+        if stopped:
+            logger.info(f"Successfully sent stop command to container {container_id}")
+            stop_success = True
+        else:
+            logger.error(f"Stop command failed or container {container_id} not found by Docker for meeting {internal_meeting_id}. Marking as error.")
+            meeting.status = 'error' # Mark as error if stop failed
+    else:
+        # This case might happen if status was 'requested' but no container was ever assigned
+        logger.warning(f"No container ID found for meeting {internal_meeting_id} with status '{meeting.status}'. Marking as stopped.")
+        stop_success = True # No container to stop, consider it 'stopped'
 
-# --- Remove or Refactor Old Endpoints --- 
-# @app.post("/bot/run")
-# async def run_bot(...):
-#     ...
+    # 3. Update Meeting record
+    if stop_success:
+        meeting.status = 'stopped'
+    meeting.end_time = datetime.utcnow()
+    await db.commit()
+    await db.refresh(meeting)
 
-# @app.post("/bot/stop")
-# async def stop_bot(...):
-#     ...
+    return MeetingResponse.from_orm(meeting)
 
-# @app.get("/bot/status/{user_id}")
-# async def bot_status(...):
-#     ...
-
-# @app.post("/transcription")
-# async def add_transcription(...):
-#     ...
-
-# @app.get("/transcript/{user_id}/{meeting_id}")
-# async def get_transcript(...):
-#     ...
-
-# @app.get("/meetings/{user_id}")
-# async def get_user_meetings(...):
-#     ...
+# Remove old/debug endpoints if they exist
 
 if __name__ == "__main__":
     uvicorn.run(
-        "main:app", 
-        host="0.0.0.0", 
+        "main:app",
+        host="0.0.0.0",
         port=8080, # Default port for bot-manager
-        reload=True, # Enable reload for development
-        log_level=logging.getLogger().level
+        reload=True # Enable reload for development if needed
     ) 

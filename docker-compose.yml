@@ -13,9 +13,13 @@ services:
       - TRANSCRIPTION_COLLECTOR_URL=http://transcription-collector:8000
       - LOG_LEVEL=DEBUG
     depends_on:
-      - admin-api
-      - bot-manager
-      - transcription-collector
+      admin-api:
+        condition: service_started
+      bot-manager:
+        condition: service_started
+      transcription-collector:
+        condition: service_started
+    restart: unless-stopped
 
   admin-api:
     build:
@@ -23,6 +27,8 @@ services:
       dockerfile: services/admin-api/Dockerfile
     ports:
       - "8057:8001"
+    env_file:
+      - .env
     environment:
       - REDIS_URL=redis://redis:6379/0
       - DB_HOST=postgres
@@ -30,11 +36,13 @@ services:
       - DB_NAME=vexa
       - DB_USER=postgres
       - DB_PASSWORD=postgres
-      - ADMIN_API_TOKEN=supersecretadmintoken
       - LOG_LEVEL=DEBUG
     depends_on:
-      - redis
-      - postgres
+      redis:
+        condition: service_started
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
 
   bot-manager:
     build:
@@ -54,8 +62,11 @@ services:
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
     depends_on:
-      - redis
-      - postgres
+      redis:
+        condition: service_started
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
 
   whisperlive:
     build:
@@ -77,7 +88,9 @@ services:
               device_ids: ['3']
               capabilities: [gpu]
     depends_on:
-      - transcription-collector
+      transcription-collector:
+        condition: service_started
+    restart: unless-stopped
 
   transcription-collector:
     build:
@@ -95,13 +108,17 @@ services:
       - REDIS_PORT=6379
       - LOG_LEVEL=DEBUG
     depends_on:
-      - redis
-      - postgres
+      redis:
+        condition: service_started
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
 
   redis:
     image: redis:7.0-alpine
     volumes:
       - redis-data:/data
+    restart: unless-stopped
 
   postgres:
     image: postgres:15-alpine
@@ -111,6 +128,15 @@ services:
       - POSTGRES_PASSWORD=postgres
     volumes:
       - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d vexa"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+    ports:
+      - "5438:5432"
 
 volumes:
   redis-data:

@@ -1,103 +1,153 @@
-# Vexa - Meeting Bot & Transcription System
+<p align="left">
+  <img src="assets/logodark.svg" alt="Vexa Logo" width="40"/>
+</p>
 
-A microservices-based system for deploying and managing meeting bots (Vexa Bot) that join meetings, stream audio for live transcription using Whisper, filter transcriptions, and store the results.
+# Vexa: API for **Real-Time Meeting Transcription**
 
-## Architecture
+Vexa is an API for **real-time meeting transcription** using **meeting bots** and direct **streaming from web/mobile apps**. It extracts knowledge from various platforms including:
 
-The system consists of several key microservices orchestrated via Docker Compose (for development) and designed for Kubernetes (Helm charts pending):
+- **Google Meet**
+- **Zoom**
+- **Microsoft Teams**
 
-1.  **API Gateway (`api-gateway`)** - The main entry point (`http://localhost:8056`) for client requests, routing to downstream services and handling initial authentication checks.
-2.  **Admin API (`admin-api`)** - Handles administrative tasks like user creation and API token generation. Accessible directly during development (`http://localhost:8057`) or via the gateway (`/admin` routes). Requires `X-Admin-API-Key` header.
-3.  **Bot Manager (`bot-manager`)** - Manages the lifecycle of Vexa Bot containers, interacting with the Docker daemon to start/stop bots based on API requests. Requires `X-API-Key` header via the gateway.
-4.  **Transcription Collector (`transcription-collector`)** - Receives transcription segments via WebSocket from WhisperLive, filters them for relevance, and stores them in PostgreSQL.
-5.  **WhisperLive (`whisperlive`)** - Performs live speech-to-text transcription using GPU resources (requires NVIDIA Docker setup). Streams results to the Transcription Collector. Accessible directly for debugging (`http://localhost:9090`).
-6.  **Vexa Bot Image (`vexa-bot:latest`)** - The Docker image for the actual bot (built from `services/vexa-bot/core`). This image is *not* run as a service in Docker Compose but is launched on demand by the Bot Manager.
-7.  **Redis** - Used for caching, locking (Bot Manager), and potentially inter-service communication.
-8.  **PostgreSQL (`postgres`)** - Primary database for storing user data, API tokens, and filtered transcriptions.
+Built with a **scalable architecture**, Vexa is designed to eventually support **thousands of simultaneous users** and **concurrent transcription sessions**. It aims to be an **enterprise-grade** alternative to [recall.ai](https://recall.ai) with numerous extra features, developed with **secure corporate environments** in mind where **data security** and **compliance** are crucial.
 
-## Local Development Setup
+## API Capabilities
 
-### Prerequisites
+<div align="left">
+  <a href="https://api.dev.vexa.ai/docs">
+    <img src="https://img.shields.io/badge/API-Documentation-2ea44f?style=for-the-badge" alt="API Documentation">
+  </a>
+</div>
 
--   Docker and Docker Compose installed
--   Git (with Git LFS potentially needed by submodules)
--   Python 3.x (for the model download script)
--   NVIDIA Container Toolkit (if using `whisperlive` with GPU acceleration)
+## Simple API Integration
+**Set up and running in under 5 minutes**
 
-### Getting Started
+*(Note: Vexa is currently in closed beta. You are welcome to apply for free beta access and obtain your `X-API-Key` at [https://api.dev.vexa.ai/pricing](https://api.dev.vexa.ai/pricing))*.
 
-1.  **Clone the Repository:**
-    ```bash
-    git clone <repository-url> vexa
-    cd vexa
-    ```
-
-2.  **Initialize Submodules:**
-    This project uses Git submodules (`services/vexa-bot` and `services/WhisperLive`). Initialize and clone them:
-    ```bash
-    git submodule update --init --recursive
-    ```
-
-3.  **Configure Environment:**
-    Create a `.env` file from the example and customize it with your settings (especially `ADMIN_API_TOKEN`).
-    ```bash
-    cp env-example .env
-    # Now edit the .env file with your preferred editor
-    nano .env
-    ```
-
-4.  **Download Whisper Model:**
-    The `whisperlive` service requires a pre-trained Whisper model. Run the provided script to download it (adjust model name in script/compose file if needed).
-    ```bash
-    python download_model.py
-    ```
-    This will download the model to the `./hub` directory, which is mounted into the `whisperlive` container.
-
-5.  **Build Vexa Bot Image:**
-    The Vexa Bot image needs to be built manually before starting the system, as it's launched dynamically by the Bot Manager. Ensure submodules are initialized first (Step 2).
-    ```bash
-    docker build -t vexa-bot:latest -f services/vexa-bot/core/Dockerfile ./services/vexa-bot/core
-    ```
-
-6.  **Build and Start Services:**
-    Use Docker Compose to build the other service images and start the system. It will use the values from your `.env` file.
-    ```bash
-    # Build service images (excluding vexa-bot which was built in the previous step)
-    docker compose build
-
-    # Start all services in detached mode
-    docker compose up -d
-    ```
-    This will start all services defined in `docker-compose.yml`.
-
-7.  **Accessing Services:**
-    *   **Main API:** `http://localhost:8056` (API Gateway)
-    *   **Admin API (Direct Dev Access):** `http://localhost:8057`
-    *   **WhisperLive (Debug):** `http://localhost:9090`
-    *   **Transcription Collector (Debug):** `http://localhost:8123` (Maps to container port 8000)
-    *   **PostgreSQL (Direct Dev Access):** `localhost:5438` (Maps to container port 5432)
-    Internal services (Bot Manager, Transcription Collector, Redis, Postgres) communicate over the Docker network and are not directly exposed by default (except for the debug/direct access ports listed above).
-
-8.  **Check Status:**
+### Create a meeting bot
 ```bash
-docker-compose ps
+# POST /bots
+curl -X POST https://gateway.dev.vexa.ai/bots \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: YOUR_CLIENT_API_KEY" \
+  -d '{
+    "meeting_url": "https://meet.google.com/xxx-xxxx-xxx",
+    "platform": "google_meet"
+  }'
 ```
 
-9.  **View Logs:**
+### Retrieve meeting transcript
 ```bash
-    # Tail logs for all services
-    docker-compose logs -f
-
-    # Tail logs for a specific service
-    docker-compose logs -f api-gateway
-    docker-compose logs -f bot-manager
-    # etc...
-    ```
-
-### API Usage (Development)
-
-*   **Admin Operations:** Access via `http://localhost:8057` or `http://localhost:8056/admin/...`. Requires the `X-Admin-API-Key` header (value set as `ADMIN_API_TOKEN` in the project's `.env` file - see Step 3 in Getting Started).
-    *   Example: `curl -H "X-Admin-API-Key: YOUR_ADMIN_TOKEN_FROM_DOTENV" http://localhost:8057/admin/users`
-*   **Client Operations:** Access via the gateway `http://localhost:8056`. Requires the `X-API-Key` header (value corresponds to a token generated via the admin API).
-    *   Example (Request Bot):
+# GET /transcripts/{platform}/{native_meeting_id}
+# Example assumes native_meeting_id is derived from the meeting URL
+curl -H "X-API-Key: YOUR_CLIENT_API_KEY" \
+  https://gateway.dev.vexa.ai/transcripts/google_meet/xxx-xxxx-xxx
 ```
+
+```json
+{
+  "data": {
+    "meeting_id": "meet_abc123",
+    "transcripts": [
+      {
+        "time": "00:01:15",
+        "speaker": "John Smith",
+        "text": "Let's discuss the quarterly results."
+      },
+      {
+        "time": "00:01:23",
+        "speaker": "Sarah Johnson",
+        "text": "The Q3 revenue exceeded our projections by 15%."
+      },
+      {
+        "time": "00:01:42",
+        "speaker": "Michael Chen",
+        "text": "Customer acquisition costs decreased by 12% from last quarter."
+      }
+    ]
+  }
+}
+```
+
+### Inputs:
+- **Meeting Bots**: Automated bots that join your meetings on:
+  - Google Meet
+  - Zoom
+  - Microsoft Teams
+  - And more platforms
+
+- **Direct Streaming**: Capture audio directly from:
+  - Web applications
+  - Mobile apps
+
+### Features:
+- **Real-time multilingual transcription** supporting **99 languages** with **Whisper**
+- (**Note:** Additional features like LLM processing, translation, RAG, and MCP server access are planned - see 'Coming Next')
+
+## Scalability Architecture Overview
+
+Vexa is designed from the ground up as a **high-performance, scalable multiuser service** using a microservice-based architecture allowing independent scaling of components and distributed processing.
+*(For architecture details relevant to deployment, see [DEPLOYMENT.md](DEPLOYMENT.md))*.
+
+## Current Status
+
+- **Google Meet Bot:** Fully operational bot for joining Google Meet calls.
+- **Real-time Transcription:** Low-latency, multilingual transcription service is live.
+- **Pending:** Speaker identification is under development.
+
+## Coming Next
+
+- **Microsoft Teams Bot:** Integration for automated meeting attendance (April 2025).
+- **Zoom Bot:** Integration for automated meeting attendance (May 2025).
+- **Direct Streaming:** Ability to stream audio directly from web/mobile apps.
+- **Real-time LLM Processing:** Enhancements for transcript readability and features.
+- **Real-time Translation:** Translation between supported languages.
+- **Meeting Knowledge Extraction (RAG):** Post-meeting analysis and Q&A.
+- **MCP Server:** Access to transcription data for agents.
+
+## Self-Deployment
+
+For **security-minded companies**, Vexa offers complete **self-deployment** options.
+
+Detailed instructions for setting up a local development environment or deploying the system yourself can be found in [DEPLOYMENT.md](DEPLOYMENT.md).
+
+## Contributing
+
+Contributors are welcome! Join our community and help shape Vexa's future:
+
+- **Research & Discuss**:
+  - Review our **roadmap** in the [Project Tasks Board](https://github.com/Vexa-ai/vexa/projects)
+  - Join discussions in our [Discord Community](https://discord.gg/Ga9duGkVz9)
+  - Share your ideas and feedback
+
+- **Get Involved**:
+  - Browse available **tasks** in our task manager
+  - Request task assignment through Discord
+  - Submit **pull requests** for review
+
+- **Critical Tasks**:
+  - Selected **high-priority tasks** will be marked with **bounties**
+  - Bounties are sponsored by the **Vexa core team**
+  - Check task descriptions for bounty details and requirements
+
+To contribute:
+1. Join our Discord community
+2. Review the roadmap and available tasks
+3. Request task assignment
+4. Submit a pull request
+
+## Project Links
+
+- 🌐 [Vexa Website](https://vexa.ai)
+- 💼 [LinkedIn](https://www.linkedin.com/company/vexa-ai/)
+- 🐦 [X (@grankin_d)](https://x.com/grankin_d)
+- 💬 [Discord Community](https://discord.gg/Ga9duGkVz9)
+
+## License
+
+[![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
+
+Vexa is licensed under the **Apache License, Version 2.0**. See [LICENSE](LICENSE) for the full license text.
+
+The Vexa name and logo are trademarks of **Vexa.ai Inc**. See [TRADEMARK.md](TRADEMARK.md) for more information.

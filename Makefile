@@ -1,69 +1,61 @@
-.PHONY: up down build logs ps clean test run-bot help clone-bot-repo setup
+.PHONY: all setup submodules env download-model build-bot-image build up down clean ps logs
 
-help:
-	@echo "Vexa Bot Management System - Development Commands"
-	@echo ""
-	@echo "Usage:"
-	@echo "  make setup          - Clone Vexa Bot repo and setup environment"
-	@echo "  make up             - Start all services (docker-compose up -d)"
-	@echo "  make down           - Stop all services (docker-compose down)"
-	@echo "  make build          - Build all services"
-	@echo "  make logs           - Show logs from all services"
-	@echo "  make logs-gateway   - Show logs from gateway service"
-	@echo "  make logs-bot-manager - Show logs from bot-manager service"
-	@echo "  make ps             - List running containers"
-	@echo "  make clean          - Remove all containers and volumes"
-	@echo "  make test           - Run a test bot"
-	@echo "  make run-bot USER=user123 MEETING=meeting456 MEETING_URL=https://meet.google.com/xxx-xxxx-xxx - Run a custom bot"
+# Default target: Sets up everything and starts the services
+all: setup build up
 
-setup: clone-bot-repo
-	@echo "Setup complete. You can now run 'make build' and 'make up'"
+# Target to perform all initial setup steps
+setup: submodules env download-model build-bot-image
+	@echo "Setup complete. Please ensure you have edited the .env file."
 
-clone-bot-repo:
-	@echo "Cloning Vexa Bot repository..."
-	@if [ -d "vexa-bot" ]; then \
-		echo "Vexa Bot repository already exists"; \
+# Initialize and update Git submodules
+submodules:
+	@echo "---> Initializing and updating Git submodules..."
+	@git submodule update --init --recursive
+
+# Create .env file from example
+env:
+	@echo "---> Creating .env file..."
+	@if [ ! -f .env ]; then \
+		cp env-example .env; \
+		echo "*** .env file created. Please edit it with your configuration. ***"; \
 	else \
-		git clone https://github.com/Vexa-ai/vexa-bot.git; \
+		echo ".env file already exists. Skipping creation."; \
 	fi
 
+# Download the Whisper model
+download-model:
+	@echo "---> Downloading Whisper model (this may take a while)..."
+	@python download_model.py
+
+# Build the standalone vexa-bot image
+build-bot-image:
+	@echo "---> Building vexa-bot:latest image..."
+	@docker build -t vexa-bot:latest -f services/vexa-bot/core/Dockerfile ./services/vexa-bot/core
+
+# Build Docker Compose service images (excluding vexa-bot)
+build:
+	@echo "---> Building Docker Compose services..."
+	@docker compose build
+
+# Start services in detached mode
 up:
-	docker-compose up -d
+	@echo "---> Starting Docker Compose services..."
+	@docker compose up -d
 
+# Stop services
 down:
-	docker-compose down
+	@echo "---> Stopping Docker Compose services..."
+	@docker compose down
 
-build: clone-bot-repo
-	docker-compose build
-
-logs:
-	docker-compose logs -f
-
-logs-gateway:
-	docker-compose logs -f gateway
-
-logs-bot-manager:
-	docker-compose logs -f bot-manager
-
-logs-transcription:
-	docker-compose logs -f transcription-service
-
-logs-bot:
-	docker-compose logs -f bot
-
-ps:
-	docker-compose ps
-
+# Stop services and remove volumes
 clean:
-	docker-compose down -v
+	@echo "---> Stopping Docker Compose services and removing volumes..."
+	@docker compose down -v
 
-test: clone-bot-repo
-	docker-compose run --rm bot-test
+# Show container status
+ps:
+	@docker compose ps
 
-run-bot: clone-bot-repo
-	@if [ -z "$(USER)" ] || [ -z "$(MEETING)" ]; then \
-		echo "Error: USER and MEETING parameters are required"; \
-		echo "Usage: make run-bot USER=user123 MEETING=meeting456 MEETING_URL=https://meet.google.com/xxx-xxxx-xxx"; \
-		exit 1; \
-	fi
-	docker-compose run --rm -e USER_ID=$(USER) -e MEETING_ID=$(MEETING) -e MEETING_URL=$(MEETING_URL) bot 
+# Tail logs for all services
+logs:
+	@docker compose logs -f
